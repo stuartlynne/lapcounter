@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <title>LapCounter</title>
+        <link rel="icon" type="image/png" href="data:image/png;base64,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" />
+        <style>
+            * { margin:0; padding:0 }
+            html, body { width:100%; height:100%; }
+            canvas { display:block; }
+        </style>
+<script>
+
+// configuration for lap text display
+//let standard_layout = false;
+//let right_aligned_text = false;
+//let bottom_row_minimal_text = true;
+// Restore settings from localStorage
+// Restore settings from localStorage with default values
+standard_layout = (localStorage.getItem("standard_layout") ?? "true") === "true";
+right_aligned_text = (localStorage.getItem("right_aligned_text") ?? "false") === "true";
+bottom_row_minimal_text = (localStorage.getItem("bottom_row_minimal_text") ?? "false") === "true";
+timer_only = (localStorage.getItem("timer_only") ?? "false") === "true";
+
+function hex( n ) {
+    return ('0'+Number(n).toString(16)).slice(-2);
+}
+function color( r, g, b ) {
+    return '#' + hex(r) + hex(g) + hex(b);
+}
+
+function CleanLCLabel( lcLabelIn ) {
+    lcLabelIn = lcLabelIn.toUpperCase();
+    var lcLabel = '';
+    for( var i = 0; i < lcLabelIn.length; ++i ) {
+        var c = lcLabelIn.charAt(i);
+        // Accept letters and numbers for lap display.
+        if( '1' <= c && c <= '9' )
+            c = String.fromCharCode('A'.charCodeAt(0) + c.charCodeAt(0) - '1'.charCodeAt(0));
+        if( c == '-' ) {
+            if( lcLabel && lcLabel.charAt([lcLabel.length-1]) != '-' )
+                lcLabel += '-';
+        }
+        else if ( 'A' <= c && c <= cMaxLabels )
+            lcLabel += c;
+    }
+    return lcLabel;
+}
+function GetLCLabel(lapCounter) {
+    const useLocalColors = localStorage.getItem("color_layout") !== "host";
+
+    if (useLocalColors) {
+        let layout = lapCounter?.layoutSpec;
+        ////console.log("GetLCLabel: Auto lcLabel based on color override:", layout);
+        return layout;
+    } else {
+        let lcLabel = '';
+        const matches = /^\/LapCounter([1-9A-Z-]+)\.html$/.exec(window.location.pathname);
+        if (matches && matches.length === 2) {
+            lcLabel = matches[1];
+        }
+        //console.log("GetLCLabel: lcLabel:", lcLabel);
+        return CleanLCLabel(lcLabel);
+    }
+}
+
+
+function formatTime( secs ) {
+    secs = Math.floor( secs );
+    var s = secs % 60;
+    var m = Math.floor(secs / 60) % 60;
+    var h = Math.floor(secs / (60*60));
+    return (h ? (h + ':') : '') +  ('0' + m + ':').slice(-3) + ('0' + s).slice(-2);
+}
+
+function formatTimeNoLeadingZero( secs ) {
+    var t = formatTime( secs );
+    if( t && t.charAt(0) == '0' )
+        t = t.substring( 1 )
+    return t;
+}
+    
+
+function strToMillis( s ) {
+    if( s == null )
+        return null;
+    s = s.replace(/[^0-9]/g,' ');
+    var v = s.split(' ');
+    return (new Date(
+        parseInt(v[0],10), parseInt(v[1],10)-1, parseInt(v[2],10),
+        parseInt(v[3],10), parseInt(v[4],10), parseInt(v[5],10), parseInt(v[6],10)
+    )).getTime();
+}
+
+var MaxLabels = 6;
+var cMaxLabels = String.fromCharCode('A'.charCodeAt(0) + MaxLabels - 1);
+
+function LapCounter( aCanvas ) {
+    this.canvas = aCanvas;
+    this.flashOn = false;
+    this.nTimer = 0;
+    this.labels = [['999',false,null]];
+    this.foregrounds = ['#FFFFFF','#FFFFFF','#FFFFFF','#FFFFFF','#FFFFFF','#FFFFFF'];
+    this.backgrounds = [color(16,16,16), color(34,139,34), color(235,155,0), color(147,112,219), color(0,0,139), color(139,0,0)];
+    this.lapElapsedClock = true;
+    this.tRaceStart = null;
+
+    this.tessellate = function ( numLabels ) {
+        var width = this.canvas.width, height = this.canvas.height;
+        if( numLabels == 1 ) {
+            return [[0, 0, width, height]];
+        }
+        else if( numLabels == 2 ) {
+            w = Math.floor(width / 2);
+            return [[0, 0, w, height], [w, 0, w, height]];
+        }
+        else if( numLabels <= 4 ) {
+            w = Math.floor(width / 2);
+            h = Math.floor(height / 2);
+            return [
+                [0, 0, w, h], [w, 0, w, h],
+                [0, h, w, h], [w, h, w, h],
+            ];
+        }
+        else {
+            w = Math.floor(width / 3);
+            h = Math.floor(height / 2);
+            return [
+                [0, 0, w, h], [w, 0, w, h], [2*w, 0, w, h],
+                [0, h, w, h], [w, h, w, h], [2*w, h, w, h],
+            ];
+        }
+    }
+
+    this.getRectangles = function(lcLabel) {
+        const useLocalColors = localStorage.getItem("color_layout") !== "host";
+
+        //console.log("getRectangles: lcLabel=%s useLocalColors=%s", lcLabel, useLocalColors);
+
+        let colsPerRow = [0];
+        let lcs = [];
+
+        for (let i = 0; i < lcLabel.length; ++i) {
+            let c = lcLabel.charAt(i);
+            if ('1' <= c && c <= '9')
+                c = String.fromCharCode(c.charCodeAt(0) - '1'.charCodeAt(0) + 'A'.charCodeAt(0));
+            if (c === '-') {
+                colsPerRow.push(0);
+            } else if ('A' <= c && c <= cMaxLabels) {
+                ++colsPerRow[colsPerRow.length - 1];
+                lcs.push(c.charCodeAt(0) - 'A'.charCodeAt(0));
+            }
+        }
+
+        const lcPositions = new Array(MaxLabels);
+        if (colsPerRow.length === 1 && colsPerRow[0] === 0) return lcPositions;
+
+        const width = this.canvas.width, height = this.canvas.height;
+        const h = height / colsPerRow.length;
+        let iLC = 0;
+        for (let row = 0; row < colsPerRow.length; ++row) {
+            const w = width / colsPerRow[row];
+            for (let col = 0; col < colsPerRow[row]; ++col) {
+                lcPositions[lcs[iLC++]] = [Math.floor(col * w), Math.floor(row * h), Math.floor(w), Math.floor(h)];
+            }
+        }
+        return lcPositions;
+    };
+    
+
+    
+    this.onResize = function() {
+
+        let prevOrientation = this.orientation;
+        this.orientation = (window.innerWidth > window.innerHeight) ? "landscape" : "portrait";
+
+        if (localStorage.getItem("color_layout") !== "host" && this.orientation !== prevOrientation) {
+            // Regenerate layout on orientation change
+            this.setLabels(this.labels);
+        }
+
+
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+        this.draw();
+    }
+
+    this.onTimer = function() {
+        this.flashOn = !this.flashOn;
+        this.draw();
+    }
+    
+    this.needsTimer = function() {
+        for( var i = 0; i < this.labels.length; ++i ) {
+            if( this.labels[i][1] ) {
+                return true;
+            }
+        }
+        if( this.lapElapsedClock ) {
+            for( var i = 0; i < this.labels.length; ++i ) {
+                if( this.labels[i][2] != null ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    this.setLabels = function( labels ) {
+        labels = labels || [['999', false, null]];
+
+        this.labels = labels;
+        const useLocalColors = localStorage.getItem("color_layout") !== "host";
+        const isPortrait = (window.innerHeight > window.innerWidth);
+        const numLabels = labels.length;
+
+        if (useLocalColors) {
+            // Automatically construct layout
+            let layout = "";
+            for (let i = 0; i < numLabels; i++) {
+                layout += String.fromCharCode("A".charCodeAt(0) + i);
+                if (isPortrait && i < numLabels - 1) {
+                    layout += "-";
+                }
+            }
+            this.layoutSpec = layout;
+            //console.log("setLabels: Auto layout based on color override this.layoutSpec:", this.layoutSpec);
+        } 
+
+        // labels is of the format [[label1, flash, tLapStart], [label2, flash, tLapStart], ...]
+        this.labels = labels.slice(0, MaxLabels);
+        if( this.needsTimer() ) {
+            if( !this.nTimer ) {
+                this.nTimer = setInterval( this.onTimer.bind(this), 333 );
+                this.flashOn = true;
+            }
+        }
+        else {
+            if( this.nTimer ) {
+                clearInterval( this.nTimer );
+                this.nTimer = 0;
+            }
+        }
+        this.draw();
+    }
+
+    this.onRefresh = function( msg ) {
+        this.tRaceStart = (new Date).getTime() - msg.curRaceTime * 1000.0;
+        this.lapElapsedClock = msg.lapElapsedClock;
+        this.setLabels( msg.labels );
+        const colorLayout = localStorage.getItem("color_layout") || "host";
+        const invertColors = localStorage.getItem("invert_colors") === "true";
+
+
+        if (colorLayout === "host") {
+            this.foregrounds = msg.foregrounds;
+            this.backgrounds = msg.backgrounds;
+        }
+        else {
+            this.foregrounds = [];
+            this.backgrounds = [];
+
+            for (let i = 0; i < this.labels.length; i++) {
+                if (colorLayout === "bw") {
+                    // Black/White alternating
+                    this.backgrounds.push(i % 2 === 0 ? "#000000" : "#FFFFFF");
+                    this.foregrounds.push(i % 2 === 0 ? "#FFFFFF" : "#000000");
+                } 
+                if (colorLayout === "wr") {
+                    // White/Red alternating
+                    this.backgrounds.push(i % 2 === 0 ? "#FFFFFF" : "#FF0000");
+                    this.foregrounds.push(i % 2 === 0 ? "#FF0000" : "#FFFFFF");
+                } 
+                if (colorLayout === "wb_wr") {
+                    // White/Black and White/Red alternating
+                    this.backgrounds.push("#FFFFFF");
+                    this.foregrounds.push(i % 2 === 0 ? "#000000" : "#FF0000");
+                }
+            }
+        }
+
+        if (invertColors) {
+            const temp = this.foregrounds;
+            this.foregrounds = this.backgrounds;
+            this.backgrounds = temp;
+        }
+
+    }
+    
+    this.draw = function() {
+        var dc = this.canvas.getContext('2d');
+        var width = this.canvas.width, height = this.canvas.height;
+        
+        // Get the labels to draw from the url path.
+        var lcLabel = GetLCLabel(this);
+
+        // Check if we are drawing anything.
+        var drawSomething = (this.labels.length > 0);
+        if( lcLabel ) {
+            drawSomething = false;
+            for( var i = 0; !drawSomething && i < this.labels.length; ++i )
+                drawSomething = (lcLabel.indexOf(String.fromCharCode('A'.charCodeAt(0) + i)) >= 0);
+        }
+        if( !drawSomething ) {
+            dc.fillStyle = '#D3D3D3';
+            dc.fillRect( 0, 0, width, height );
+            return;
+        }
+        
+        dc.fillStyle = '#000000';
+        dc.fillRect( 0, 0, width, height );
+        
+        function oldgetFontSizeToFit( dc, text, w, h ) {
+            w = Math.floor( w * 0.95 );
+            h = Math.floor( h * 0.95 );
+            var fontSize = h * 1.15;
+            dc.font = 'bold ' + fontSize + "px Arial";
+            var wText = dc.measureText( text ).width;
+            if( wText > w ) {
+                fontSize *= w / wText;
+                dc.font = 'bold ' + fontSize + "px Arial";
+            }
+            return fontSize;
+        }
+
+
+        function getFontSizeToFit(dc, text, w, h, minFontSize = 12) {
+            let fontSize = h * 0.8;  // Start with a reasonable fraction of the height
+            dc.font = `bold ${fontSize}px Arial`;
+
+            let wText = dc.measureText(text).width;
+            let scaleFactor = 0;  // Ensure scaleFactor is properly initialized
+
+            if (wText > w || fontSize > h) {
+                // Calculate a scaling factor for both width and height constraints
+                scaleFactor = Math.min(w / (wText + 1), h / (fontSize + 1)); 
+                fontSize = Math.floor(fontSize * scaleFactor);
+            }
+
+            // Prevent font size from being too large or too small
+            fontSize = Math.max(minFontSize, Math.min(fontSize, h * 0.8));
+            dc.font = `bold ${fontSize}px Arial`;
+
+            //console.log(`getFontSizeToFit: text="${text}", wText=${wText}, w=${w}, h=${h}, scaleFactor=${scaleFactor}, fontSize=${fontSize}`);
+            
+            return fontSize;
+        }
+
+        
+        function drawText( dc, label, colour, x, y, w, h ) {
+            var fontSize = getFontSizeToFit( dc, label, w, h );
+            var xText = x + w/2, yText = y + h / 2;
+            dc.textAlign = 'center';
+            dc.textBaseline = 'middle';
+            dc.fillStyle = colour;
+            dc.fillText( label, xText, yText );
+        }
+
+        function drawLapTextRight(dc, label, colour, x, y, w, h) {
+
+            let adjustedHeight = h * 1.40;  // Allow more space by using 95% of height
+            let fontSize = getFontSizeToFit(dc, label, w, adjustedHeight);
+            dc.font = `bold ${fontSize}px Arial`;
+
+            let xText = x + w / 2;
+            let yText = y + h / 2 + 10; // Keep centered
+
+            dc.textAlign = 'center';
+            dc.textBaseline = 'middle';
+
+            // Draw shadow for contrast
+            if (colour != '#000000') {
+                dc.fillStyle = '#000000';
+                let shadowOffset = fontSize / 50;
+                dc.fillText(label, xText + shadowOffset, yText + shadowOffset);
+            }
+
+            // Draw main text
+            dc.fillStyle = colour;
+            dc.fillText(label, xText, yText);
+        }
+
+
+        // XXX Standard version
+        function drawLapTextStandard( dc, label, colour, x, y, w, h ) {
+            var fontSize = getFontSizeToFit( dc, label, w, h );
+            var xText = x + w/2, yText = y + h / 2;
+            dc.textAlign = 'center';
+            dc.textBaseline = 'middle';
+            if( colour != '#000000' ) {
+                dc.fillStyle = '#000000';
+                var shadowOffset = fontSize/52;
+                dc.fillText( label, xText + shadowOffset, yText + shadowOffset );
+            }
+            dc.fillStyle = colour;
+            dc.fillText( label, xText, yText );
+        }
+
+        
+        // Get the position of each label on the screen.
+        var rects = (lcLabel ? this.getRectangles(lcLabel) : this.tessellate(this.labels.length));
+        
+        var footerMult = 0.18;
+        var lineBorderWidth = 4;
+
+        for (var i = 0; i < this.labels.length; ++i) {
+            var rect = rects[i];
+            if (rect == undefined) continue;
+
+            var entry = this.labels[i];
+            var label = entry[0] + '', flash = entry[1], tLapStart = entry[2];
+            var x = rect[0], y = rect[1], w = rect[2], h = rect[3];
+
+            dc.fillStyle = this.backgrounds[i];
+            dc.fillRect(x, y, w, h);
+            dc.lineWidth = 4;
+            dc.strokeStyle = '#000000';
+            dc.strokeRect(x, y, w, h);
+
+            // 1. Draw the main lap count at the top (unaffected)
+            //if (!flash || this.flashOn) {
+            if (!timer_only && (!flash || this.flashOn)) {
+                drawLapTextRight(dc, label, this.foregrounds[i], x, y, w, h);
+            }
+
+            // 2. Prepare the bottom row text (category label, bell, time)
+            let bottomText = "";
+            let leftText = "";
+            let rightText = "";
+            let rightSideText = "";
+            let middleText = "";
+            let timeText = "";
+
+
+                                     
+
+            // Append category label (e.g., "A", "B", etc.)
+            if (this.labels.length > 1) {
+                var catText = String.fromCharCode('A'.charCodeAt(0) + i) + " ";
+                bottomText += catText;
+                leftText += catText;
+                rightSideText += catText;
+                middleText += catText;
+            }
+
+
+
+            // Append lap elapsed time
+            // XXX
+            if (this.lapElapsedClock) {
+                if (tLapStart != null && this.tRaceStart) {
+                    var tLap = this.tRaceStart + tLapStart * 1000.0;
+                    var secs = ((new Date).getTime() - tLap) / 1000.0;
+                    timeText = formatTimeNoLeadingZero(secs) + " ";
+                    //bottomText += timeText;
+                    rightSideText += timeText;
+                    middleText += timeText;
+                    rightText += timeText;
+                }
+            }
+            // Append bell symbol for last lap
+            if (label == '1') {
+                var bellText = '\uD83D\uDD14' + " ";
+                bottomText += bellText;
+                rightSideText += bellText;
+                rightText += bellText;
+            }
+            else {
+                bottomText += timeText;
+            }
+
+
+            // Left aligned bottom row text
+            // Only draw bottom row if there's content
+            if (bottom_row_minimal_text) {
+                //console.log("bottom_row_minimal_text: leftText=" + leftText);
+                //console.log("bottom_row_minimal_text: rightText=" + rightText);
+
+                let bottomHeight = h * 0.24;  // Define height for the bottom row
+                let bottomY = y + h - bottomHeight;  // Align to bottom
+            
+                let fontSize = getFontSizeToFit(dc, leftText, w, bottomHeight) *2.2;
+                dc.font = `bold ${fontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textBaseline = 'bottom';  // Align to bottom
+                if (leftText.trim()) {
+                    dc.textAlign = 'left';
+                    dc.fillText(leftText.trim(), x, bottomY + bottomHeight - 5);  // Offset slightly
+                }
+                fontSize = getFontSizeToFit(dc, leftText, w, bottomHeight) *0.8;
+                dc.font = `bold ${fontSize}px Arial`;
+                if (rightText.trim()) {
+                    let rightWidth = w * 0.10;  // Define width for the right text
+                    dc.textAlign = 'right';
+                    dc.fillText(rightText.trim(), x + w, bottomY + bottomHeight - 5);  // Offset slightly
+                }
+            }
+
+            //let standard_layout = false;
+            //let right_aligned_text = false;
+            //let bottom_row_minimal_text = 1;
+
+            // Right hand aligned text
+            // Only draw right-aligned vertical text if there's content
+            if (right_aligned_text && rightText.trim()) {
+                //console.log("right_aligned_text: rightText=" + rightText);
+                let rightWidth = w * 0.20;  // Define width for the right text
+                let rightX = x + w - rightWidth;  // Align to right
+
+                let fontSize = getFontSizeToFit(dc, rightText, rightWidth, h);
+                dc.save();  // Save current canvas state
+                dc.translate(rightX + rightWidth / 2, y + h / 2);  // Move to center right
+                dc.rotate(-Math.PI / 2);  // Rotate text counterclockwise
+                dc.font = `bold ${fontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textAlign = 'center';
+                dc.textBaseline = 'middle';
+                dc.fillText(rightText.trim(), 0, 0);  // Draw rotated text
+                dc.restore();  // Restore previous state
+            }
+
+
+            // Standard bottom row text
+            // Only draw bottom row if there's content
+            if (standard_layout && middleText.trim()) {
+                //console.log("standard_layout: middleText=" + middleText);
+                let bottomHeight = h * 0.18;  // Define height for the bottom row
+                let bottomY = y + h - bottomHeight;  // Align to bottom
+              
+                let fontSize = getFontSizeToFit(dc, middleText, w, bottomHeight);
+                dc.font = `bold ${fontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textAlign = 'center';
+                dc.textBaseline = 'bottom';  // Align to bottom
+                dc.fillText(middleText.trim(), x + w / 2, bottomY + bottomHeight - 5);  // Offset slightly
+            }
+
+            if (timer_only && middleText.trim()) {
+                //console.log("timer_layout: middleText=" + middleText);
+                let fontSize = 0;
+
+            // Check if timeText is in HH:MM:SS format
+            let timeParts = timeText.split(":");
+            let isLongFormat = timeParts.length === 3; // True if HH:MM:SS
+
+            if (!isLongFormat) {
+                // Standard MM:SS format: Draw normally at the bottom
+                let bottomHeight = h * 10.0;
+                let bottomY = y + h - bottomHeight;
+                fontSize = getFontSizeToFit(dc, timeText, w, bottomHeight);
+
+                dc.font = `bold ${fontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textAlign = 'center';
+                dc.textBaseline = 'bottom';
+                dc.fillText(timeText.trim(), x + w / 2, bottomY + bottomHeight - 5);
+
+                //console.log("Standard timer layout - MM:SS");
+            } else {
+
+                // HH:MM:SS format - Lower both bigTime and smallTime
+                let bigTime = timeParts[0] + ":" + timeParts[1]; // HH:MM
+                let smallTime = ":" + timeParts[2]; // :SS
+
+                let bigOffsetDown = h * 0.25;  // Lower both lines by the same amount
+                let smallOffsetDown = h * 0.15;  // Lower both lines by the same amount
+
+                // Large HH:MM (bigTime) - Lowered
+                let bigHeight = h * 0.50;
+                let bigY = y + h - bigHeight * 1.1 + bigOffsetDown;  // Lowered position
+                let bigFontSize = getFontSizeToFit(dc, bigTime, w * 1.0, bigHeight) * 1.5; // 50% larger
+
+                dc.font = `bold ${bigFontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textAlign = 'left';
+                dc.textBaseline = 'bottom';
+                dc.fillText(bigTime, x + 20, bigY);
+
+                // Small :SS (smallTime) - Lowered by same amount
+                let smallHeight = h * 0.30;
+                let smallY = y + h - smallHeight * 0.6 + smallOffsetDown;  // Lowered position
+                let smallFontSize = getFontSizeToFit(dc, smallTime, w * 0.6, smallHeight);
+
+                dc.font = `bold ${smallFontSize}px Arial`;
+                dc.textAlign = 'right';
+                dc.textBaseline = 'bottom';
+                dc.fillText(smallTime, x + w - 20, smallY);
+
+            }
+
+
+                // TOP TEXT (Category Name) - Move to top-right corner
+                let topHeight = h * 0.10;  // Define height for the top row
+                let topY = y + topHeight * 0.5;  // Align to top
+
+                fontSize = getFontSizeToFit(dc, catText, w * 0.3, topHeight);  // Scale width properly for top-right
+                dc.font = `bold ${fontSize}px Arial`;
+                dc.fillStyle = this.foregrounds[i];
+                dc.textAlign = 'right';   // Align text to the right
+                dc.textBaseline = 'top';  // Align to top
+
+                dc.fillText(catText.trim(), x + w - 10, topY);  // Offset from right edge
+                //console.log("h: %s y: %s topHeight: %s topY: %s fontSize: %s", h, y, topHeight, topY, fontSize);
+
+            }
+        }
+    }
+    this.setLabels( this.labels );
+}
+
+var websocket = null;
+var timeoutID = null
+function RetryResetWebSocket() {
+    if( timeoutID === null )
+        timeoutID = setTimeout( ResetWebSocket, 5000 );
+}
+function ResetWebSocket() {
+    if( timeoutID !== null ) {
+        clearTimeout( timeoutID );
+        timeoutID = null;
+    }
+
+    if ("WebSocket" in window) {
+        if( websocket && websocket.readyState != websocket.CLOSED ) {
+            websocket.close();
+            websocket = null;
+        }
+        console.log('Connecting to WebSocket...');
+
+        //var wsurl = 'ws://' + window.location.hostname + ':' + (parseInt(window.location.port) + 2) + '/';
+        //var wsurl = 'ws://' + 'localhost' + ':' + (parseInt(window.location.port) + 2) + '/';
+        var wsurl = 'ws://192.168.40.40:8767/'; 
+        //console.log( 'wsurl="' + wsurl + '"' );
+        //console.log('WebSocket URL: ', wsUrl);
+        console.log('window.location: %s', window.location);
+        console.dir(window.location);
+        websocket = new window.WebSocket( wsurl );
+
+        websocket.onmessage = function( evt ) {
+            var msg = JSON.parse( evt.data );
+            if( msg.cmd == 'refresh' ) {
+                lapCounter.onRefresh( msg );
+            }
+        };
+        
+        websocket.onerror = function(e) {
+            console.log('WebSocket: Error.  Scheduling reconnect in 5 seconds...');
+            RetryResetWebSocket();
+        };
+        
+        websocket.onclose = function(e) {
+            console.log('WebSocket: Closed.  Scheduling reconnect in 5 seconds...');
+            RetryResetWebSocket();
+        };
+    }
+}
+function CloseWebSocket() {
+    if( websocket )
+        websocket.close();
+    websocket = null;
+}
+
+function sleep(ms) {
+    setTimeout(() => {
+    console.log("After sleep");
+}, ms*1000); 
+}
+
+function SetLabelsToDraw(event) {
+    // Prevents triggering when clicking inside an open modal
+    if (document.getElementById("layoutModal")) {
+        console.log("SetLabelsToDraw ignored: Modal already open");
+        return;
+    }
+
+    //console.log("SetLabelsToDraw called");
+
+    // Create the modal container
+    let modal = document.createElement("div");
+    modal.id = "layoutModal";
+    modal.style.position = "fixed";
+    modal.style.top = "50%";
+    modal.style.left = "50%";
+    modal.style.transform = "translate(-50%, -50%)";
+    modal.style.padding = "20px";
+    modal.style.background = "#fff";
+    modal.style.border = "2px solid #000";
+    modal.style.zIndex = "1000";
+    modal.style.fontFamily = "Arial, sans-serif";
+    modal.style.boxShadow = "2px 2px 10px rgba(0,0,0,0.5)";
+    
+    // Auto-scale width based on screen size
+    let screenWidth = window.innerWidth;
+    modal.style.width = Math.min(screenWidth * 0.4, 600) + "px";  // Scale to 40% of width, max 600px
+    modal.style.fontSize = Math.min(screenWidth * 0.02, 20) + "px";  // Scale text size
+
+    // Auto-close timer (15 seconds)
+    let inactivityTimeout = setTimeout(() => {
+        console.log("Popup auto-closed due to inactivity.");
+        closeModal();
+    }, 15000);
+
+    function resetTimer() {
+        clearTimeout(inactivityTimeout);
+        inactivityTimeout = setTimeout(() => {
+            console.log("Popup auto-closed due to inactivity.");
+            closeModal();
+        }, 15000);
+    }
+
+    // Detect ESC key press to close
+    function escKeyHandler(event) {
+        if (event.key === "Escape") {
+            console.log("ESC key pressed, closing popup.");
+            closeModal();
+        }
+    }
+    document.addEventListener("keydown", escKeyHandler);
+
+    // Function to close modal
+    function closeModal() {
+        if (modal.parentNode) {
+            modal.parentNode.removeChild(modal);
+        }
+        document.removeEventListener("keydown", escKeyHandler); // Remove ESC listener
+    }
+
+    // Prompt for Lap Counters
+    let labelPrompt = document.createElement("p");
+    labelPrompt.textContent = "Enter Lap Counters to Display (e.g., A, B, AB, CD, ABC-DE):";
+    modal.appendChild(labelPrompt);
+
+    let input = document.createElement("input");
+    input.type = "text";
+    input.value = GetLCLabel(lapCounter); // Pre-fill with current label
+    input.style.width = "100%";
+    input.style.marginBottom = "10px";
+    input.style.fontSize = "1em";
+    modal.appendChild(input);
+
+    // Detect Enter key to confirm
+    input.addEventListener("keypress", function (event) {
+        if (event.key === "Enter") {
+            console.log("Enter pressed, closing popup.");
+            confirmBtn.click();
+        }
+    });
+
+    // Reset inactivity timer on interaction
+    input.addEventListener("input", resetTimer);
+
+    // Create radio button options
+    let layoutPrompt = document.createElement("p");
+    layoutPrompt.textContent = "Select Layout Mode:";
+    modal.appendChild(layoutPrompt);
+
+    let options = [
+        { id: "standard", text: "Standard Layout",         varName: "standard_layout" },
+        { id: "right",    text: "Right-Aligned Text",      varName: "right_aligned_text" },
+        { id: "minimal",  text: "Bottom Row Minimal Text", varName: "bottom_row_minimal_text" },
+        { id: "timer",    text: "Timer Only",              varName: "timer_only" }
+    ];
+
+    // Find the currently selected layout
+    let selectedLayout = options.find(opt => localStorage.getItem(opt.varName) === "true")?.varName || "bottom_row_minimal_text";
+    console.log("color_layout =", localStorage.getItem("color_layout"));
+    console.log("invert_colors =", localStorage.getItem("invert_colors"));
+
+
+    options.forEach(opt => {
+        let div = document.createElement("div");
+        div.style.marginBottom = "5px";
+
+        let radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "layout";
+        radio.id = opt.id;
+        radio.value = opt.varName;
+        radio.checked = (opt.varName === selectedLayout);
+
+        console.log(`Adding event listener to ${opt.id}, checked=${radio.checked}`);
+
+        // Ensure clicking updates selection immediately
+        radio.addEventListener("change", function () {
+            console.log(`Radio button clicked: ${this.value}`);
+            selectedLayout = this.value;
+
+            // Ensure only one layout is active
+            options.forEach(option => {
+                let isSelected = option.varName === selectedLayout;
+                window[option.varName] = isSelected;
+                localStorage.setItem(option.varName, isSelected);
+            });
+
+            console.log("Updated layout:", {
+                standard_layout,
+                right_aligned_text,
+                bottom_row_minimal_text,
+                timer_only
+            });
+
+            // Ensure only one radio is checked
+            options.forEach(option => {
+                let radioElement = document.getElementById(option.id);
+                if (radioElement) {
+                    radioElement.checked = (option.varName === selectedLayout);
+                }
+            });
+
+            resetTimer(); // Reset auto-close timer on selection
+            closeModal();
+            let newLabels = CleanLCLabel(input.value);
+            window.location.assign('/LapCounter' + newLabels + '.html');
+        });
+
+        div.appendChild(radio);
+
+
+
+
+        let label = document.createElement("label");
+        label.htmlFor = opt.id;
+        label.textContent = opt.text;
+        div.appendChild(label);
+
+        modal.appendChild(div);
+    });
+
+        // ----- Color Layout Options -----
+        let colorPrompt = document.createElement("p");
+        colorPrompt.textContent = "Select Color Layout:";
+        modal.appendChild(colorPrompt);
+
+        let colorOptions = [
+            { id: "color_host", label: "Host", value: "host" },
+            { id: "color_bw", label: "B/W - B/W alternating", value: "bw" },
+            { id: "color_wr", label: "W/R - R/W alternating", value: "wr" },
+            { id: "color_wr", label: "W/B - W/R alternating", value: "wb_wr" }
+        ];
+
+        let currentColorLayout = localStorage.getItem("color_layout") || "host";
+
+        colorOptions.forEach(opt => {
+            let div = document.createElement("div");
+            div.style.marginBottom = "5px";
+
+            let radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = "color_layout";
+            radio.id = opt.id;
+            radio.value = opt.value;
+            radio.checked = (opt.value === currentColorLayout);
+
+            radio.addEventListener("change", function () {
+                localStorage.setItem("color_layout", this.value);
+                closeModal();
+                let newLabels = CleanLCLabel(input.value);
+                window.location.assign('/LapCounter' + newLabels + '.html');
+            });
+
+            div.appendChild(radio);
+
+            let label = document.createElement("label");
+            label.htmlFor = opt.id;
+            label.textContent = opt.label;
+            div.appendChild(label);
+
+            modal.appendChild(div);
+        });
+
+        // ----- Invert Option -----
+        let invertDiv = document.createElement("div");
+        invertDiv.style.marginTop = "10px";
+
+        let invertCheckbox = document.createElement("input");
+        invertCheckbox.type = "checkbox";
+        invertCheckbox.id = "invert_colors";
+        invertCheckbox.checked = localStorage.getItem("invert_colors") === "true";
+
+        invertCheckbox.addEventListener("change", function () {
+            localStorage.setItem("invert_colors", this.checked);
+            closeModal();
+            let newLabels = CleanLCLabel(input.value);
+            window.location.assign('/LapCounter' + newLabels + '.html');
+        });
+
+        let invertLabel = document.createElement("label");
+        invertLabel.htmlFor = "invert_colors";
+        invertLabel.textContent = "Invert foreground/background";
+
+        invertDiv.appendChild(invertCheckbox);
+        invertDiv.appendChild(invertLabel);
+
+        modal.appendChild(invertDiv);
+
+
+
+    // Add Confirm button
+    let btnContainer = document.createElement("div");
+    btnContainer.style.marginTop = "15px";
+    btnContainer.style.textAlign = "center";
+
+    let confirmBtn = document.createElement("button");
+    confirmBtn.textContent = "OK";
+    confirmBtn.onclick = function () {
+        console.log("Confirm clicked.");
+
+        // Close the modal properly
+        closeModal();
+
+        // Reload with new settings
+        let newLabels = CleanLCLabel(input.value);
+        window.location.assign('/LapCounter' + newLabels + '.html');
+    };
+
+    btnContainer.appendChild(confirmBtn);
+    modal.appendChild(btnContainer);
+
+    // Append modal to body
+    document.body.appendChild(modal);
+
+    // Prevent the click event from bubbling up
+    event.stopPropagation();
+}
+
+
+
+// Ensure SetLabelsToDraw() is only called when clicking on an empty space, not when interacting with radio buttons
+document.body.addEventListener("click", function (event) {
+    if (!event.target.closest("#layoutModal")) {
+        SetLabelsToDraw(event);
+    }
+});
+
+
+
+
+
+
+function origSetLabelsToDraw() {
+    var lcLabel = GetLCLabel();
+    var lcLabelNew = prompt("Enter the Lap Counters to Display (eg. A, B, AB, CD, ABC-DE):", lcLabel);
+    if( lcLabelNew == null || lcLabelNew == lcLabel )
+        return;
+    
+    lcLabel = CleanLCLabel( lcLabelNew );
+    window.location.assign( '/LapCounter' + lcLabel + '.html' );
+}
+
+function onLoad() {
+    lapCounter = new LapCounter( document.getElementById('lapCounter') );
+    window.addEventListener('resize', lapCounter.onResize.bind(lapCounter), false);
+    lapCounter.onResize();
+    ResetWebSocket();
+    
+    document.body.addEventListener('click', SetLabelsToDraw, true );
+}
+</script>
+    </head>
+    <body onload="onLoad()">
+        <canvas id="lapCounter"></canvas>
+    </body>
+</html>
