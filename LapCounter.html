@@ -626,12 +626,15 @@ function ResetWebSocket() {
             websocket = null;
         }
         console.log('Connecting to WebSocket...');
+        console.log('window.location.hostname: %s', window.location.hostname);
+        console.log('window.location.port: %s', window.location.port);
+        console.log('localhost: %s', 'localhost');
 
-        //var wsurl = 'ws://' + window.location.hostname + ':' + (parseInt(window.location.port) + 2) + '/';
+        var wsurl = 'ws://' + window.location.hostname + ':' + (parseInt(window.location.port) + 2) + '/';
         //var wsurl = 'ws://' + 'localhost' + ':' + (parseInt(window.location.port) + 2) + '/';
-        var wsurl = 'ws://192.168.40.40:8767/'; 
         //console.log( 'wsurl="' + wsurl + '"' );
-        //console.log('WebSocket URL: ', wsUrl);
+        //var wsurl = 'ws://192.168.40.41:8767/'; 
+        console.log( 'wsurl="' + wsurl + '"' );
         console.log('window.location: %s', window.location);
         console.dir(window.location);
         websocket = new window.WebSocket( wsurl );
