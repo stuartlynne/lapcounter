@@ -473,26 +473,27 @@ function LapCounter( aCanvas ) {
             // Left aligned bottom row text
             // Only draw bottom row if there's content
             if (bottom_row_minimal_text) {
-                //console.log("bottom_row_minimal_text: leftText=" + leftText);
-                //console.log("bottom_row_minimal_text: rightText=" + rightText);
+                // Bottom row layout: smaller category (left), time/bell (right)
+                const bottomHeight = h * 0.24;
+                const padding = Math.max(2, Math.floor(h * 0.01));
+                const baselineY = y + h - padding; // Flush to bottom edge with small padding
 
-                let bottomHeight = h * 0.24;  // Define height for the bottom row
-                let bottomY = y + h - bottomHeight;  // Align to bottom
-            
-                let fontSize = getFontSizeToFit(dc, leftText, w, bottomHeight) *2.2;
-                dc.font = `bold ${fontSize}px Arial`;
-                dc.fillStyle = this.foregrounds[i];
-                dc.textBaseline = 'bottom';  // Align to bottom
+                // Category (left): reduce size ~3x from previous implementation
                 if (leftText.trim()) {
+                    let fontSize = getFontSizeToFit(dc, leftText, w, bottomHeight) * 0.35;
+                    dc.font = `bold ${fontSize}px Arial`;
+                    dc.fillStyle = this.foregrounds[i];
+                    dc.textBaseline = 'bottom';
                     dc.textAlign = 'left';
-                    dc.fillText(leftText.trim(), x, bottomY + bottomHeight - 5);  // Offset slightly
+                    dc.fillText(leftText.trim(), x + padding, baselineY);
                 }
-                fontSize = getFontSizeToFit(dc, leftText, w, bottomHeight) *0.8;
-                dc.font = `bold ${fontSize}px Arial`;
+
+                // Time/Bell (right): keep existing general size but fix baseline and sizing text
                 if (rightText.trim()) {
-                    let rightWidth = w * 0.10;  // Define width for the right text
+                    let fontSize = getFontSizeToFit(dc, rightText, w, bottomHeight) * 0.8;
+                    dc.font = `bold ${fontSize}px Arial`;
                     dc.textAlign = 'right';
-                    dc.fillText(rightText.trim(), x + w, bottomY + bottomHeight - 5);  // Offset slightly
+                    dc.fillText(rightText.trim(), x + w - padding, baselineY);
                 }
             }
 
