@@ -21,6 +21,7 @@ standard_layout = (localStorage.getItem("standard_layout") ?? "true") === "true"
 right_aligned_text = (localStorage.getItem("right_aligned_text") ?? "false") === "true";
 bottom_row_minimal_text = (localStorage.getItem("bottom_row_minimal_text") ?? "false") === "true";
 timer_only = (localStorage.getItem("timer_only") ?? "false") === "true";
+elasped_time = (localStorage.getItem("elasped_time") ?? "false") === "true";
 
 function hex( n ) {
     return ('0'+Number(n).toString(16)).slice(-2);
@@ -46,22 +47,13 @@ function CleanLCLabel( lcLabelIn ) {
     }
     return lcLabel;
 }
-function GetLCLabel(lapCounter) {
-    const useLocalColors = localStorage.getItem("color_layout") !== "host";
-
-    if (useLocalColors) {
-        let layout = lapCounter?.layoutSpec;
-        ////console.log("GetLCLabel: Auto lcLabel based on color override:", layout);
-        return layout;
-    } else {
-        let lcLabel = '';
-        const matches = /^\/LapCounter([1-9A-Z-]+)\.html$/.exec(window.location.pathname);
-        if (matches && matches.length === 2) {
-            lcLabel = matches[1];
-        }
-        //console.log("GetLCLabel: lcLabel:", lcLabel);
-        return CleanLCLabel(lcLabel);
+function GetLCLabel() {
+    let lcLabel = '';
+    const matches = /^\/LapCounter([1-9A-Z-]+)\.html$/.exec(window.location.pathname);
+    if (matches && matches.length === 2) {
+        lcLabel = matches[1];
     }
+    return CleanLCLabel(lcLabel);
 }
 
 
@@ -104,6 +96,9 @@ function LapCounter( aCanvas ) {
     this.backgrounds = [color(16,16,16), color(34,139,34), color(235,155,0), color(147,112,219), color(0,0,139), color(139,0,0)];
     this.lapElapsedClock = true;
     this.tRaceStart = null;
+    this.curRaceTimeStart = null;
+    this.curRaceTime = 0;
+    this.labelStartTimes = {};
 
     this.tessellate = function ( numLabels ) {
         var width = this.canvas.width, height = this.canvas.height;
@@ -170,16 +165,6 @@ function LapCounter( aCanvas ) {
 
     
     this.onResize = function() {
-
-        let prevOrientation = this.orientation;
-        this.orientation = (window.innerWidth > window.innerHeight) ? "landscape" : "portrait";
-
-        if (localStorage.getItem("color_layout") !== "host" && this.orientation !== prevOrientation) {
-            // Regenerate layout on orientation change
-            this.setLabels(this.labels);
-        }
-
-
         this.canvas.width = window.innerWidth;
         this.canvas.height = window.innerHeight;
         this.draw();
@@ -209,24 +194,6 @@ function LapCounter( aCanvas ) {
     this.setLabels = function( labels ) {
         labels = labels || [['999', false, null]];
 
-        this.labels = labels;
-        const useLocalColors = localStorage.getItem("color_layout") !== "host";
-        const isPortrait = (window.innerHeight > window.innerWidth);
-        const numLabels = labels.length;
-
-        if (useLocalColors) {
-            // Automatically construct layout
-            let layout = "";
-            for (let i = 0; i < numLabels; i++) {
-                layout += String.fromCharCode("A".charCodeAt(0) + i);
-                if (isPortrait && i < numLabels - 1) {
-                    layout += "-";
-                }
-            }
-            this.layoutSpec = layout;
-            //console.log("setLabels: Auto layout based on color override this.layoutSpec:", this.layoutSpec);
-        } 
-
         // labels is of the format [[label1, flash, tLapStart], [label2, flash, tLapStart], ...]
         this.labels = labels.slice(0, MaxLabels);
         if( this.needsTimer() ) {
@@ -246,6 +213,10 @@ function LapCounter( aCanvas ) {
 
     this.onRefresh = function( msg ) {
         this.tRaceStart = (new Date).getTime() - msg.curRaceTime * 1000.0;
+        if ( this.curRaceTimeStart == null ) {
+            this.curRaceTimeStart = msg.curRaceTime;
+        }
+        this.curRaceTime = msg.curRaceTime;
         this.lapElapsedClock = msg.lapElapsedClock;
         this.setLabels( msg.labels );
         const colorLayout = localStorage.getItem("color_layout") || "host";
@@ -292,7 +263,7 @@ function LapCounter( aCanvas ) {
         var width = this.canvas.width, height = this.canvas.height;
         
         // Get the labels to draw from the url path.
-        var lcLabel = GetLCLabel(this);
+        var lcLabel = GetLCLabel();
 
         // Check if we are drawing anything.
         var drawSomething = (this.labels.length > 0);
@@ -606,6 +577,14 @@ function LapCounter( aCanvas ) {
         }
     }
     this.setLabels( this.labels );
+    for (let i = 0; i < this.labels.length; ++i) {
+        const label = this.labels[i][0];
+        const tLapStart = this.labels[i][2];
+        if (tLapStart != null && this.labelStartTimes[label] == null) {
+            this.labelStartTimes[label] = tLapStart;
+            console.log("LapCounter: this.labelStartTimes[%s] = %s", label, tLapStart);
+        }
+    }   
 }
 
 var websocket = null;
@@ -630,17 +609,27 @@ function ResetWebSocket() {
         console.log('window.location.port: %s', window.location.port);
         console.log('localhost: %s', 'localhost');
 
-        var wsurl = 'ws://' + window.location.hostname + ':' + (parseInt(window.location.port) + 2) + '/';
-        //var wsurl = 'ws://' + 'localhost' + ':' + (parseInt(window.location.port) + 2) + '/';
-        //console.log( 'wsurl="' + wsurl + '"' );
-        //var wsurl = 'ws://192.168.40.41:8767/'; 
-        console.log( 'wsurl="' + wsurl + '"' );
+        var proto = (window.location.protocol === "https:") ? "wss://" : "ws://";
+        var host = window.location.hostname;
+        var port = window.location.port;
+
+        // Default to 8765 if no port (e.g., when accessed as https://hostname/)
+        var httpPort = port ? parseInt(port) : 8765;
+        var wsPort = httpPort + 2;
+        var wsurl = proto + host + ":" + wsPort + "/";
+
+        // Log for debugging
+        console.log('wsurl="' + wsurl + '"');
         console.log('window.location: %s', window.location);
         console.dir(window.location);
-        websocket = new window.WebSocket( wsurl );
+
+        // Connect
+        websocket = new window.WebSocket(wsurl);
 
         websocket.onmessage = function( evt ) {
             var msg = JSON.parse( evt.data );
+            console.log('WebSocket: Message received:', msg);
+            console.dir(msg);
             if( msg.cmd == 'refresh' ) {
                 lapCounter.onRefresh( msg );
             }
@@ -735,7 +724,7 @@ function SetLabelsToDraw(event) {
 
     let input = document.createElement("input");
     input.type = "text";
-    input.value = GetLCLabel(lapCounter); // Pre-fill with current label
+    input.value = GetLCLabel(); // Pre-fill with current label
     input.style.width = "100%";
     input.style.marginBottom = "10px";
     input.style.fontSize = "1em";
@@ -761,7 +750,8 @@ function SetLabelsToDraw(event) {
         { id: "standard", text: "Standard Layout",         varName: "standard_layout" },
         { id: "right",    text: "Right-Aligned Text",      varName: "right_aligned_text" },
         { id: "minimal",  text: "Bottom Row Minimal Text", varName: "bottom_row_minimal_text" },
-        { id: "timer",    text: "Timer Only",              varName: "timer_only" }
+        { id: "timer_only",    text: "Timer Only",              varName: "timer_only" },
+        { id: "elapsed_time",  text: "Elasped Time",            varName: "elasped_time" },
     ];
 
     // Find the currently selected layout
@@ -799,7 +789,8 @@ function SetLabelsToDraw(event) {
                 standard_layout,
                 right_aligned_text,
                 bottom_row_minimal_text,
-                timer_only
+                timer_only,
+                elasped_time,
             });
 
             // Ensure only one radio is checked
@@ -838,7 +829,7 @@ function SetLabelsToDraw(event) {
             { id: "color_host", label: "Host", value: "host" },
             { id: "color_bw", label: "B/W - B/W alternating", value: "bw" },
             { id: "color_wr", label: "W/R - R/W alternating", value: "wr" },
-            { id: "color_wr", label: "W/B - W/R alternating", value: "wb_wr" }
+            { id: "color_wb_wr", label: "W/B - W/R alternating", value: "wb_wr" }
         ];
 
         let currentColorLayout = localStorage.getItem("color_layout") || "host";
