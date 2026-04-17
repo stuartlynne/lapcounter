@@ -36,6 +36,7 @@ DISTANCE_TO_FINISH_METERS = 50.0
 MAX_PASSINGS = 500
 GROUP_GAP_SECONDS = 2.0
 MAX_GROUPS = 200
+GROUP_MAX_AGE_SECONDS = 30.0
 LOCAL_READ_DEDUP_SECONDS = 8.0
 RE_TIME = re.compile(r"^\d\d:\d\d:\d\d\.\d+")
 RE_SPEED = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(km/h|kph|mph)?", re.I)
@@ -1004,6 +1005,8 @@ class SharedState:
                     current_group["passings"].append(passing)
                     current_group["end"] = passing.seen_at
             prev_seen_at = passing.seen_at
+        cutoff_seen_at = dt.datetime.now().astimezone() - dt.timedelta(seconds=GROUP_MAX_AGE_SECONDS)
+        groups = [group for group in groups if group.get("end") and group["end"] >= cutoff_seen_at]
         groups = groups[-MAX_GROUPS:]
 
         rows: list[dict[str, Any]] = []
@@ -1413,33 +1416,39 @@ class WebServer:
 <title>lapsrv</title>
 <style>
 :root {{
-  --bg: #0f172a;
-  --panel: #111827;
-  --panel-2: #1f2937;
-  --fg: #e5e7eb;
-  --muted: #9ca3af;
-  --accent: #f59e0b;
-  --ok: #22c55e;
-  --border: #374151;
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --panel-2: #e5eef7;
+  --fg: #0f172a;
+  --muted: #475569;
+  --accent: #b45309;
+  --ok: #15803d;
+  --border: #cbd5e1;
 }}
 * {{ box-sizing: border-box; }}
 body {{
   margin: 0;
   font-family: "Trebuchet MS", "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top, #1e293b 0%, var(--bg) 55%);
+  background: linear-gradient(180deg, #fefefe 0%, #eef6ff 100%);
   color: var(--fg);
 }}
+body.compact-mode .default-view {{ display: none; }}
+body:not(.compact-mode) .compact-view {{ display: none; }}
 main {{
   max-width: 1400px;
   margin: 0 auto;
   padding: 16px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }}
 .title {{
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
+  align-items: flex-start;
+  gap: 8px;
   flex-wrap: wrap;
+  margin-bottom: 6px;
 }}
 .meta {{ color: var(--muted); font-size: 0.95rem; }}
 .statusbar {{
@@ -1447,6 +1456,28 @@ main {{
   gap: 10px;
   flex-wrap: wrap;
   align-items: center;
+}}
+.toolbar {{
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-top: -4px;
+}}
+.view-toggle, .audio-toggle {{
+  border: 1px solid rgba(250,204,21,.45);
+  background: rgba(250,204,21,.12);
+  color: #92400e;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  cursor: pointer;
+}}
+.audio-toggle.active {{
+  background: rgba(21,128,61,.12);
+  border-color: rgba(21,128,61,.35);
+  color: #166534;
 }}
 .badge {{
   display: inline-flex;
@@ -1459,23 +1490,23 @@ main {{
   border: 1px solid transparent;
 }}
 .state-connected {{
-  background: rgba(34,197,94,.16);
-  color: #bbf7d0;
-  border-color: rgba(34,197,94,.35);
+  background: rgba(34,197,94,.12);
+  color: #166534;
+  border-color: rgba(34,197,94,.24);
 }}
 .state-waiting, .state-timedout {{
-  background: rgba(245,158,11,.16);
-  color: #fde68a;
-  border-color: rgba(245,158,11,.35);
+  background: rgba(245,158,11,.14);
+  color: #92400e;
+  border-color: rgba(245,158,11,.28);
 }}
 .state-error {{
-  background: rgba(239,68,68,.16);
-  color: #fecaca;
-  border-color: rgba(239,68,68,.35);
+  background: rgba(239,68,68,.12);
+  color: #991b1b;
+  border-color: rgba(239,68,68,.24);
 }}
 .group-wrap {{
   margin: 16px 0 18px;
-  background: rgba(17,24,39,.92);
+  background: rgba(255,255,255,.96);
   border: 1px solid var(--border);
   border-radius: 14px;
   overflow: hidden;
@@ -1487,19 +1518,24 @@ main {{
   font-size: 1.05rem;
   font-weight: 700;
   color: var(--muted);
-  background: rgba(31,41,55,.98);
+  background: rgba(229,238,247,.98);
   border-bottom: 1px solid var(--border);
 }}
 .group-rows {{
   overflow-y: auto;
   user-select: text;
   -webkit-user-select: text;
+  background: rgba(255,255,255,.98);
 }}
 .recent-group-rows {{
-  height: 34vh;
+  height: 48vh;
+}}
+body.compact-mode .recent-group-rows {{
+  height: auto;
+  flex: 1 1 auto;
 }}
 .past-group-rows {{
-  height: 34vh;
+  height: 26vh;
 }}
 .group-table {{
   width: 100%;
@@ -1508,7 +1544,7 @@ main {{
 }}
 .group-table th, .group-table td {{
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(55,65,81,.75);
+  border-bottom: 1px solid rgba(203,213,225,.95);
   font-size: 0.98rem;
   vertical-align: top;
 }}
@@ -1543,7 +1579,7 @@ main {{
 }}
 .group-cell.lapped {{
   background: rgba(226, 232, 240, 0.16);
-  color: #e2e8f0;
+  color: #64748b;
 }}
 .group-cell.lapped .group-cell-content {{
   justify-content: flex-end;
@@ -1553,6 +1589,73 @@ main {{
   font-weight: 700;
 }}
 .group-empty {{ color: #6b7280; }}
+.compact-wrap {{
+  margin: 16px 0 0;
+  background: rgba(255,255,255,.96);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+}}
+.compact-table {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}}
+.compact-table th:nth-child(1), .compact-table td:nth-child(1) {{
+  width: 70px;
+  white-space: nowrap;
+}}
+.compact-table th:nth-child(2), .compact-table td:nth-child(2) {{
+  width: 56px;
+  white-space: nowrap;
+}}
+.compact-table th, .compact-table td {{
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(203,213,225,.95);
+  font-size: 1.02rem;
+  vertical-align: top;
+  background: rgba(255,255,255,.98);
+}}
+.compact-table th {{
+  background: rgba(229,238,247,.98);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}}
+.compact-group-cell {{
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  font-size: 2.3rem;
+  line-height: 1.1;
+}}
+.compact-group-lead td, .compact-group-lead .compact-group-cell {{
+  background: #facc15;
+  color: #111827;
+}}
+.compact-group-bell td, .compact-group-bell .compact-group-cell {{
+  background: #fbcfe8;
+  color: #111827;
+}}
+.compact-group-next td {{
+  font-size: 1.2rem;
+  line-height: 1.05;
+}}
+.compact-group-next .compact-group-cell {{
+  font-size: 4.4rem;
+  line-height: 0.96;
+}}
+.compact-group-next .compact-hide-meta {{
+  display: none;
+}}
+.compact-separator td {{
+  padding: 0;
+  border-bottom: none;
+  height: 14px;
+  background: transparent;
+}}
 table {{
   width: 100%;
   border-collapse: collapse;
@@ -1573,7 +1676,7 @@ th {{
   top: 0;
 }}
 tr:last-child td {{ border-bottom: none; }}
-a {{ color: #fde68a; text-decoration: none; }}
+a {{ color: #92400e; text-decoration: none; }}
 .note {{ color: var(--accent); font-weight: 700; }}
 .bell {{ color: var(--ok); font-size: 1.2rem; }}
 .table-wrap {{
@@ -1585,21 +1688,70 @@ a {{ color: #fde68a; text-decoration: none; }}
   padding: 7px 6px;
   font-size: 0.8rem;
 }}
-@media (max-width: 720px) {{
-  .group-row {{
-    grid-template-columns: 66px 58px 84px minmax(0, 1fr) 72px 86px 44px;
-    gap: 8px;
-    font-size: 1.05rem;
-  }}
-  .recent-group-rows {{
-    height: 30vh;
-  }}
-  .past-group-rows {{
-    height: 28vh;
-  }}
-  .group-meta {{ font-size: 0.8rem; }}
-  th:nth-child(6), td:nth-child(6),
-  th:nth-child(8), td:nth-child(8) {{ display: none; }}
+body.is-mobile .recent-group-rows {{
+  height: 52vh;
+}}
+body.is-mobile.compact-mode .recent-group-rows {{
+  height: auto;
+}}
+body.is-mobile .past-group-rows {{
+  height: 22vh;
+}}
+body.is-mobile .compact-table th:nth-child(1), body.is-mobile .compact-table td:nth-child(1) {{
+  width: 62px;
+}}
+body.is-mobile .compact-table th:nth-child(2), body.is-mobile .compact-table td:nth-child(2) {{
+  width: 48px;
+}}
+body.is-mobile .compact-table th, body.is-mobile .compact-table td {{
+  font-size: 0.95rem;
+  padding: 8px 6px;
+}}
+body.is-mobile .compact-group-cell {{
+  font-size: 2.1rem;
+  line-height: 1.05;
+}}
+body.is-mobile .compact-group-next td {{
+  font-size: 1.1rem;
+}}
+body.is-mobile .compact-group-next .compact-group-cell {{
+  font-size: 4rem;
+  line-height: 0.94;
+}}
+body.is-mobile th:nth-child(6), body.is-mobile td:nth-child(6),
+body.is-mobile th:nth-child(8), body.is-mobile td:nth-child(8) {{ display: none; }}
+body.is-desktop-portrait {{
+  font-size: 200%;
+}}
+body.is-desktop-portrait main {{
+  max-width: none;
+  padding: 20px;
+}}
+body.is-desktop-portrait #event {{
+  font-size: 1.1rem !important;
+}}
+body.is-desktop-portrait .view-toggle {{
+  font-size: 1.6rem;
+  padding: 10px 18px;
+}}
+body.is-desktop-portrait .group-table th, body.is-desktop-portrait .group-table td,
+body.is-desktop-portrait .compact-table th, body.is-desktop-portrait .compact-table td,
+body.is-desktop-portrait th, body.is-desktop-portrait td {{
+  font-size: inherit;
+}}
+body.is-desktop-portrait .compact-table th:nth-child(1), body.is-desktop-portrait .compact-table td:nth-child(1) {{
+  width: 120px;
+}}
+body.is-desktop-portrait .compact-table th:nth-child(2), body.is-desktop-portrait .compact-table td:nth-child(2) {{
+  width: 96px;
+}}
+body.is-desktop-portrait .compact-group-cell {{
+  font-size: 2.8rem;
+  line-height: 1.0;
+}}
+body.is-desktop-portrait .compact-group-next .compact-group-cell {{
+  font-size: 4.2rem;
+  line-height: 0.94;
 }}
 </style>
 </head>
@@ -1607,20 +1759,25 @@ a {{ color: #fde68a; text-decoration: none; }}
 <main>
   <div class="title">
     <div>
-      <h1 id="event">lapsrv</h1>
-      <div class="meta" id="meta"></div>
+      <h1 id="event" style="margin:0;font-size:1.1rem;line-height:1.1;">lapsrv</h1>
     </div>
-    <div class="statusbar" id="statusbar"></div>
+    <div class="toolbar">
+      <button class="view-toggle" id="viewToggle" type="button">Compact View</button>
+      <button class="audio-toggle" id="audioToggle" type="button">Tone Off</button>
+    </div>
   </div>
-  <div class="group-wrap">
+  <div class="compact-view compact-wrap">
+    <div class="group-rows recent-group-rows" id="compactRecentRows"></div>
+  </div>
+  <div class="default-view group-wrap">
     <div class="group-title">Recent Groups</div>
     <div class="group-rows recent-group-rows" id="recentGroupRows"></div>
   </div>
-  <div class="group-wrap">
+  <div class="default-view group-wrap">
     <div class="group-title">Past Groups</div>
     <div class="group-rows past-group-rows" id="pastGroupRows"></div>
   </div>
-  <div class="table-wrap" id="tableWrap">
+  <div class="default-view table-wrap" id="tableWrap">
     <table class="small-table">
       <thead>
         <tr>
@@ -1643,13 +1800,150 @@ a {{ color: #fde68a; text-decoration: none; }}
 const selectedCategory = {category_js};
 const apiPath = {json.dumps(api_path)};
 let autoScroll = true;
-let autoScrollGroups = true;
+let compactMode = localStorage.getItem('lapsrv_compact_mode') === '1';
+let audioCtx = null;
+let lastBellToneKey = '';
+let audioEnabled = false;
 function esc(s) {{
   return (s ?? '').toString()
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
+}}
+function shortCategory(name) {{
+  return (name || '')
+    .replaceAll(' (Men)', '(M)')
+    .replaceAll(' (Women)', '(W)')
+    .replaceAll(' (Open)', '(O)');
+}}
+function compactNote(note) {{
+  return (note || '').replaceAll('st', '').replaceAll('nd', '').replaceAll('rd', '').replaceAll('th', '').replaceAll(':', '-');
+}}
+function topGroupBellKey(groupTable) {{
+  const headers = groupTable.headers || [];
+  const rows = groupTable.rows || [];
+  const headerStatus = groupTable.header_status || {{}};
+  let inTopGroup = false;
+  const bellHeaders = [];
+  for (const row of rows) {{
+    if (row.elapsed_text) {{
+      if (inTopGroup) break;
+      inTopGroup = true;
+    }}
+    if (!inTopGroup) continue;
+    for (const h of headers) {{
+      const cell = (row.cells || {{}})[h];
+      if (!cell) continue;
+      const status = headerStatus[h] || {{}};
+      if (status.is_bell || status.text === '1') bellHeaders.push(h);
+    }}
+  }}
+  bellHeaders.sort();
+  return bellHeaders.join('|');
+}}
+function ensureAudio() {{
+  if (audioCtx) return audioCtx;
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return null;
+  audioCtx = new Ctor();
+  return audioCtx;
+}}
+async function armAudio() {{
+  audioEnabled = true;
+  updateAudioButton();
+  const ctx = ensureAudio();
+  if (ctx && ctx.state === 'suspended') await ctx.resume().catch(() => {{}});
+}}
+function playBellTone() {{
+  if (!audioEnabled) return;
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  if (ctx.state === 'suspended') {{
+    ctx.resume().catch(() => {{}});
+  }}
+  const now = ctx.currentTime;
+  const freqs = [880, 1174];
+  freqs.forEach((freq, i) => {{
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.08, now + 0.02 + i * 0.18);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16 + i * 0.18);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now + i * 0.18);
+    osc.stop(now + 0.18 + i * 0.18);
+  }});
+}}
+function maybePlayBellTone(groupTable) {{
+  const bellKey = topGroupBellKey(groupTable);
+  if (bellKey && bellKey !== lastBellToneKey) playBellTone();
+  lastBellToneKey = bellKey;
+}}
+
+function compactGroupTableHtml(groupTable) {{
+  const headers = groupTable.headers || [];
+  const rows = groupTable.rows || [];
+  const headerStatus = groupTable.header_status || {{}};
+  let currentElapsed = '';
+  let currentGap = '';
+  let groupIndex = -1;
+  const lines = [];
+  rows.forEach((row, rowIndex) => {{
+    if (row.elapsed_text) {{
+      groupIndex += 1;
+      if (rowIndex > 0) lines.push('<tr class="compact-separator"><td colspan="3"></td></tr>');
+      currentElapsed = row.elapsed_text;
+      currentGap = row.group_gap || '';
+    }}
+    headers.forEach(h => {{
+      const cell = (row.cells || {{}})[h];
+      if (!cell) return;
+      const note = compactNote(cell.note || cell.text || '');
+      const count = (cell.count || 0) > 1 ? `:${{cell.count}}` : '';
+      const status = headerStatus[h] || {{}};
+      const lapsToGo = status.is_bell ? '1' : (status.text || '');
+      const lapsText = lapsToGo ? ` (${{esc(lapsToGo)}})` : '';
+      const groupText = `${{esc(shortCategory(h))}} ${{esc(note)}}${{esc(count)}}${{lapsText}}`.trim();
+      const rowClasses = [];
+      if (groupIndex === 0) rowClasses.push('compact-group-next');
+      if (status.is_bell) rowClasses.push('compact-group-bell');
+      if (cell.is_lead) rowClasses.push('compact-group-lead');
+      const rowClass = rowClasses.join(' ');
+      if (groupIndex === 0) {{
+        lines.push(`<tr class="${{rowClass}}"><td class="compact-group-cell" colspan="3">${{groupText}}</td></tr>`);
+      }} else {{
+        lines.push(`<tr class="${{rowClass}}"><td>${{esc(currentElapsed)}}</td><td>${{esc(currentGap)}}</td><td class="compact-group-cell">${{groupText}}</td></tr>`);
+      }}
+    }});
+  }});
+  return `<table class="compact-table"><thead><tr><th>HH:MM:SS</th><th>Gap</th><th>Group</th></tr></thead><tbody>${{lines.join('')}}</tbody></table>`;
+}}
+function applyViewMode() {{
+  document.body.classList.toggle('compact-mode', compactMode);
+  const button = document.getElementById('viewToggle');
+  if (button) button.textContent = compactMode ? 'Full View' : 'Compact View';
+}}
+function updateAudioButton() {{
+  const button = document.getElementById('audioToggle');
+  if (!button) return;
+  button.textContent = audioEnabled ? 'Tone On' : 'Tone Off';
+  button.classList.toggle('active', audioEnabled);
+}}
+function applyDeviceClass() {{
+  const ua = navigator.userAgent || '';
+  const uaDataMobile = navigator.userAgentData && typeof navigator.userAgentData.mobile === 'boolean'
+    ? navigator.userAgentData.mobile
+    : null;
+  const mobileByUA = /iPhone|Android.+Mobile|Windows Phone|iPod/i.test(ua);
+  const mobileByTouch = navigator.maxTouchPoints > 1 && Math.min(window.screen.width, window.screen.height) <= 480;
+  const isMobile = uaDataMobile !== null ? uaDataMobile : (mobileByUA || mobileByTouch);
+  const isDesktopPortrait = !isMobile && window.innerHeight > window.innerWidth;
+  document.body.classList.toggle('is-mobile', isMobile);
+  document.body.classList.toggle('is-desktop-portrait', isDesktopPortrait);
 }}
 function groupTableHtml(groupTable) {{
   const headers = groupTable.headers || [];
@@ -1702,6 +1996,27 @@ function rowHtml(r) {{
 const tableWrap = document.getElementById('tableWrap');
 const recentGroupRowsWrap = document.getElementById('recentGroupRows');
 const pastGroupRowsWrap = document.getElementById('pastGroupRows');
+const compactRecentRowsWrap = document.getElementById('compactRecentRows');
+const viewToggle = document.getElementById('viewToggle');
+const audioToggle = document.getElementById('audioToggle');
+applyDeviceClass();
+applyViewMode();
+updateAudioButton();
+window.addEventListener('resize', applyDeviceClass);
+viewToggle.addEventListener('click', () => {{
+  compactMode = !compactMode;
+  localStorage.setItem('lapsrv_compact_mode', compactMode ? '1' : '0');
+  applyViewMode();
+}});
+audioToggle.addEventListener('click', async () => {{
+  if (audioEnabled) {{
+    audioEnabled = false;
+    updateAudioButton();
+    return;
+  }}
+  await armAudio();
+  playBellTone();
+}});
 tableWrap.addEventListener('scroll', () => {{
   const remaining = tableWrap.scrollHeight - tableWrap.scrollTop - tableWrap.clientHeight;
   autoScroll = remaining < 40;
@@ -1716,13 +2031,11 @@ async function refresh() {{
   const res = await fetch(apiPath, {{cache: 'no-store'}});
   const data = await res.json();
   document.getElementById('event').textContent = data.event_name || 'lapsrv';
-  document.getElementById('meta').textContent = `${{data.event_date || ''}}  ${{data.timezone || ''}}`;
   const subsystems = data.subsystems || {{}};
-  document.getElementById('statusbar').innerHTML = ['rfid','announcer','lapcounter']
-    .filter(k => subsystems[k])
-    .map(k => statusHtml(subsystems[k]))
-    .join('');
-  recentGroupRowsWrap.innerHTML = groupTableHtml(data.recent_group_table || {{headers: [], header_status: {{}}, rows: []}});
+  const recentGroupTable = data.recent_group_table || {{headers: [], header_status: {{}}, rows: []}};
+  recentGroupRowsWrap.innerHTML = groupTableHtml(recentGroupTable);
+  compactRecentRowsWrap.innerHTML = compactGroupTableHtml(recentGroupTable);
+  maybePlayBellTone(recentGroupTable);
   pastGroupRowsWrap.innerHTML = groupTableHtml(data.past_group_table || {{headers: [], header_status: {{}}, rows: []}});
   document.getElementById('rows').innerHTML = (data.passings || []).map(rowHtml).join('');
   if (autoScroll) {{
