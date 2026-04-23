@@ -368,6 +368,15 @@ class SharedState:
         self.last_announcer_update = None
         self.last_lapcounter_update = None
 
+    def reset_for_reader_reconnect(self, reader: str = "") -> None:
+        with self.lock:
+            self.passings.clear()
+            self.rider_runtime.clear()
+        logging.getLogger("lapsrv.state").warning(
+            "reader reconnect reset local RFID state%s",
+            f": {reader}" if reader else "",
+        )
+
     def update_reference(self, ref: dict[str, Any]) -> None:
         with self.lock:
             new_version_count = None
@@ -1213,12 +1222,14 @@ class JChipServer:
         reader_name = f"{addr}"
         time_adjust = 0.0
         self.logger.info("reader connected: %s", addr)
+        self.state.reset_for_reader_reconnect(reader_name)
         try:
             while not reader.at_eof():
                 raw = await reader.readuntil(CR_BYTES)
                 line = raw[:-1].decode(errors="ignore").strip()
                 if not line:
                     continue
+                self.logger.warning("reader rx: %s %s", reader_name, line)
                 if line.startswith("N"):
                     reader_name = line[5:].strip() or reader_name
                     self.logger.info("reader identified: %s", reader_name)
@@ -2361,6 +2372,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     try:
         asyncio.run(async_main(args))
