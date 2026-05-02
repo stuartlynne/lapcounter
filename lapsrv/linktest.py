@@ -17,6 +17,7 @@ import time
 import tkinter as tk
 import urllib.parse
 import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from tkinter import scrolledtext, ttk
@@ -107,11 +108,24 @@ class OmadaSession:
             urllib.request.HTTPSHandler(context=self.ssl_context),
         )
         self.base_url = self._base_url(base_address)
+        self.http_fallback_used = False
 
     def _base_url(self, address: str) -> str:
         if address.startswith("http://") or address.startswith("https://"):
             return address.rstrip("/")
         return f"https://{address}".rstrip("/")
+
+    def _fallback_to_http(self) -> bool:
+        if self.base_url.startswith("http://"):
+            return False
+        parsed = urllib.parse.urlsplit(self.base_url)
+        host = parsed.netloc or parsed.path
+        if not host:
+            return False
+        self.base_url = f"http://{host}"
+        self.http_fallback_used = True
+        debug_log(self.debug, f"http fallback enabled for {self.base_address}: {self.base_url}")
+        return True
 
     def _request(
         self,
@@ -126,12 +140,21 @@ class OmadaSession:
         if headers:
             for key, value in headers.items():
                 req.add_header(key, value)
-        debug_log(self.debug, f"http {method or ('POST' if data is not None else 'GET')} {url}")
-        with self.opener.open(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
-            charset = resp.headers.get_content_charset() or "utf-8"
-            body = resp.read().decode(charset, errors="replace")
-            debug_log(self.debug, f"http ok {url} -> {resp.geturl()} {len(body)} bytes")
-            return body, resp.geturl()
+        request_desc = method or ('POST' if data is not None else 'GET')
+        debug_log(self.debug, f"http {request_desc} {url}")
+        try:
+            with self.opener.open(req, timeout=HTTP_TIMEOUT_SECONDS) as resp:
+                charset = resp.headers.get_content_charset() or "utf-8"
+                body = resp.read().decode(charset, errors="replace")
+                debug_log(self.debug, f"http ok {url} -> {resp.geturl()} {len(body)} bytes")
+                return body, resp.geturl()
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, 'reason', None)
+            if isinstance(reason, ssl.SSLError) and self._fallback_to_http() and url.startswith('https://'):
+                retry_url = 'http://' + url[len('https://'):]
+                debug_log(self.debug, f"retry over http {retry_url}")
+                return self._request(retry_url, data=data, headers=headers, method=method)
+            raise
 
     def fetch(self, path: str = "/") -> tuple[str, str]:
         url = urllib.parse.urljoin(self.base_url + "/", path)
