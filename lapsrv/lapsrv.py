@@ -7,9 +7,13 @@ import bisect
 import datetime as dt
 import json
 import logging
+import math
 import os
 import queue
 import re
+import struct
+import subprocess
+import wave
 import signal
 import socket
 import threading
@@ -17,6 +21,8 @@ import time
 import tkinter as tk
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from shutil import which
+from io import BytesIO
 from pathlib import Path
 from tkinter import ttk
 from typing import Any, Optional
@@ -116,6 +122,38 @@ def parse_host_port(value: str, default_port: int) -> tuple[str, int]:
     return host, int(port)
 
 
+def build_tone_pcm(frequency: float = 880.0, duration: float = 0.18, sample_rate: int = 44100, amplitude: int = 32767 // 3) -> tuple[bytes, int]:
+    total_samples = int(sample_rate * duration)
+    pcm = bytearray()
+    for i in range(total_samples):
+        sample = int(amplitude * math.sin(2.0 * math.pi * frequency * (i / sample_rate)))
+        pcm.extend(struct.pack("<h", sample))
+    return bytes(pcm), sample_rate
+
+
+def build_wave_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_bytes)
+    return buffer.getvalue()
+
+
+def pick_audio_player() -> Optional[list[str]]:
+    candidates = [
+        ("paplay", ["paplay"]),
+        ("aplay", ["aplay", "-q"]),
+        ("ffplay", ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-i", "-"]),
+        ("play", ["play", "-q", "-t", "wav", "-"]),
+    ]
+    for name, cmd in candidates:
+        if which(name):
+            return cmd
+    return None
+
+
 @dataclass(slots=True)
 class RiderInfo:
     bib: str
@@ -207,6 +245,34 @@ class SubsystemStatus:
 
 
 @dataclass(slots=True)
+class IPHealthStatus:
+    address: str
+    last_ok_at: Optional[dt.datetime] = None
+    last_probe_at: Optional[dt.datetime] = None
+    last_rtt_ms: Optional[float] = None
+    last_probe_ok: Optional[bool] = None
+
+    def snapshot(self) -> dict[str, Any]:
+        now = dt.datetime.now().astimezone()
+        probe_age = None
+        if self.last_probe_at is not None:
+            probe_age = (now - self.last_probe_at).total_seconds()
+        if self.last_probe_ok is True and probe_age is not None and probe_age <= 2.5:
+            state = "ok"
+        elif probe_age is not None and probe_age <= 5.0:
+            state = "missed"
+        else:
+            state = "down"
+        return {
+            "address": self.address,
+            "state": state,
+            "last_ok_at": as_utc_iso(self.last_ok_at) if self.last_ok_at else "",
+            "last_probe_at": as_utc_iso(self.last_probe_at) if self.last_probe_at else "",
+            "last_rtt_ms": self.last_rtt_ms,
+            "last_probe_ok": self.last_probe_ok,
+        }
+
+
 class RiderRuntimeState:
     bib: str
     predicted_lap: Optional[int] = None
@@ -307,6 +373,8 @@ class SharedState:
             "announcer": SubsystemStatus(name="Announcer"),
             "lapcounter": SubsystemStatus(name="LapCounter"),
         }
+        self.ip_health: dict[str, IPHealthStatus] = {}
+        self.warning_enabled = True
 
     def effective_category_config(self, category: str) -> CategoryConfig:
         base = self.config.categories.get(category, CategoryConfig(name=category))
@@ -750,27 +818,32 @@ class SharedState:
         return rank, lap_deficit
 
     def _group_note_for_category(
-        self, group_passings: list[PassingRecord], category: str, current_race_time: Optional[float], lap_deficit_filter: int = 0
+        self, group_passings: list[PassingRecord], category: str, current_race_time: Optional[float], lap_deficit_filter: Optional[int] = None
     ) -> tuple[str, bool, bool]:
         category_passings = [p for p in group_passings if p.category == category and p.bib not in {"?", ""}]
         ranks: list[int] = []
+        deficits: list[int] = []
         best_rank: Optional[int] = None
         for passing in category_passings:
             rank, lap_deficit = self._rider_rank_and_lap_deficit(passing.bib, current_race_time)
-            if not rank or lap_deficit != lap_deficit_filter:
+            if not rank:
+                continue
+            if lap_deficit_filter is not None and lap_deficit != lap_deficit_filter:
                 continue
             ranks.append(rank)
+            deficits.append(lap_deficit)
             if best_rank is None or rank < best_rank:
                 best_rank = rank
         if not ranks or best_rank is None:
-            return "", False, lap_deficit_filter > 0
+            return "", False, bool(lap_deficit_filter and lap_deficit_filter > 0)
         worst_rank = max(ranks)
         if best_rank == worst_rank:
             note = "1st" if best_rank == 1 else ordinal(best_rank)
         else:
             start = "1st" if best_rank == 1 else ordinal(best_rank)
             note = f"{start}:{ordinal(worst_rank)}"
-        return note, best_rank == 1, lap_deficit_filter > 0
+        all_lapped = bool(deficits) and min(deficits) > 0
+        return note, best_rank == 1, all_lapped
 
     def _gap_for_rider(self, rider: RiderInfo, category: str, lap: Optional[int], current_race_time: Optional[float]) -> str:
         rank = self._rank_for_rider(rider)
@@ -1020,6 +1093,46 @@ class SharedState:
 
         rows: list[dict[str, Any]] = []
         previous_group_time: Optional[float] = None
+
+        def build_group_row(group_passings: list[PassingRecord], group_race_time: Optional[float], gap_seconds: Optional[float], is_past: bool) -> Optional[dict[str, Any]]:
+            if not group_passings:
+                return None
+            per_category: dict[str, dict[str, Any]] = {}
+            for passing in group_passings:
+                category = passing.category
+                if category not in category_order:
+                    if any(name.startswith(f"{category} (") for name in category_order):
+                        continue
+                    category_order.append(category)
+                _rank, lap_deficit = self._rider_rank_and_lap_deficit(passing.bib, current_race_time)
+                info = per_category.setdefault(category, {"count": 0, "bibs": [], "deficit_counts": {}})
+                info["count"] += 1
+                info["deficit_counts"][lap_deficit] = int(info["deficit_counts"].get(lap_deficit, 0)) + 1
+                if passing.bib not in info["bibs"]:
+                    info["bibs"].append(passing.bib)
+            cells: dict[str, dict[str, Any]] = {}
+            for category, info in per_category.items():
+                count = int(info["count"])
+                note, is_lead, is_lapped = self._group_note_for_category(group_passings, category, current_race_time)
+                cells[category] = {
+                    "text": note,
+                    "note": note,
+                    "count": count,
+                    "is_lead": is_lead,
+                    "is_lapped": is_lapped,
+                    "deficit_counts": dict(info.get("deficit_counts") or {}),
+                }
+            visible_cells = {category: cells[category] for category in category_order if category in cells}
+            if not visible_cells:
+                return None
+            return {
+                "elapsed_text": format_elapsed_hms(group_race_time),
+                "group_gap": format_elapsed_hms(gap_seconds) if gap_seconds is not None else "",
+                "total": sum(cell.get("count", 0) for cell in visible_cells.values()),
+                "cells": visible_cells,
+                "is_past": is_past,
+            }
+
         for group in groups:
             group_passings: list[PassingRecord] = group["passings"]
             group_race_time = next((p.race_time for p in group_passings if p.race_time is not None), None)
@@ -1029,61 +1142,21 @@ class SharedState:
             if group_race_time is not None:
                 previous_group_time = group_race_time
 
-            per_category: dict[str, dict[int, dict[str, Any]]] = {}
+            active_passings: list[PassingRecord] = []
+            past_passings: list[PassingRecord] = []
             for passing in group_passings:
-                category = passing.category
-                if category not in category_order:
-                    if any(name.startswith(f"{category} (") for name in category_order):
-                        continue
-                    category_order.append(category)
-                _rank, lap_deficit = self._rider_rank_and_lap_deficit(passing.bib, current_race_time)
-                cat_rows = per_category.setdefault(category, {})
-                info = cat_rows.setdefault(lap_deficit, {"count": 0, "bibs": []})
-                info["count"] += 1
-                if passing.bib not in info["bibs"]:
-                    info["bibs"].append(passing.bib)
+                rec = announcer_recorded.get(str(passing.bib))
+                if rec and (group_race_time is None or rec.get("t") >= group_race_time):
+                    past_passings.append(passing)
+                else:
+                    active_passings.append(passing)
 
-            row_deficits = sorted({deficit for deficits in per_category.values() for deficit in deficits.keys()})
-            for row_index, lap_deficit in enumerate(row_deficits):
-                cells: dict[str, dict[str, Any]] = {}
-                row_bibs: list[str] = []
-                for category, deficit_rows in per_category.items():
-                    info = deficit_rows.get(lap_deficit)
-                    if not info:
-                        continue
-                    count = int(info["count"])
-                    note, is_lead, is_lapped = self._group_note_for_category(
-                        group_passings, category, current_race_time, lap_deficit_filter=lap_deficit
-                    )
-                    parts = [note]
-                    if count > 1:
-                        parts.append(f"({count})")
-                    cells[category] = {
-                        "text": " ".join(part for part in parts if part),
-                        "note": note,
-                        "count": count,
-                        "is_lead": is_lead,
-                        "is_lapped": is_lapped,
-                    }
-                    row_bibs.extend(str(b) for b in info["bibs"])
-                visible_cells = {category: cells[category] for category in category_order if category in cells}
-                row_is_past = False
-                for bib in row_bibs:
-                    rec = announcer_recorded.get(str(bib))
-                    if not rec:
-                        continue
-                    if group_race_time is None or rec.get("t") >= group_race_time:
-                        row_is_past = True
-                        break
-                rows.append(
-                    {
-                        "elapsed_text": format_elapsed_hms(group_race_time) if row_index == 0 else "",
-                        "group_gap": format_elapsed_hms(gap_seconds) if gap_seconds is not None and row_index == 0 else "",
-                        "total": sum(cell.get("count", 0) for cell in visible_cells.values()),
-                        "cells": visible_cells,
-                        "is_past": row_is_past,
-                    }
-                )
+            recent_row = build_group_row(active_passings, group_race_time, gap_seconds, False)
+            if recent_row is not None:
+                rows.append(recent_row)
+            past_row = build_group_row(past_passings, group_race_time, gap_seconds, True)
+            if past_row is not None:
+                rows.append(past_row)
         header_status = {category: self._category_header_status(category, current_race_time) for category in category_order}
         recent_rows = [dict(r) for r in rows if not r.get("is_past")]
         past_rows = [dict(r) for r in rows if r.get("is_past")]
@@ -1109,6 +1182,30 @@ class SharedState:
         with self.lock:
             return [p.as_dict() for p in self.passings if p.category == category]
 
+    def configure_ip_health(self, addresses: list[str]) -> None:
+        with self.lock:
+            self.ip_health = {addr: self.ip_health.get(addr, IPHealthStatus(address=addr)) for addr in addresses}
+
+    def update_ip_health(self, address: str, ok: bool, rtt_ms: Optional[float] = None) -> None:
+        with self.lock:
+            status = self.ip_health.setdefault(address, IPHealthStatus(address=address))
+            status.last_probe_at = dt.datetime.now().astimezone()
+            status.last_probe_ok = ok
+            if ok:
+                status.last_ok_at = status.last_probe_at
+                status.last_rtt_ms = rtt_ms
+
+    def ip_health_snapshot(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [self.ip_health[address].snapshot() for address in self.ip_health]
+
+    def has_ip_health_issue(self) -> bool:
+        return any(item.get("state") in {"missed", "down"} for item in self.ip_health_snapshot())
+
+    def set_warning_enabled(self, enabled: bool) -> None:
+        with self.lock:
+            self.warning_enabled = bool(enabled)
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             current_race_time = self.current_race_time()
@@ -1126,6 +1223,8 @@ class SharedState:
                 "last_lapcounter_update": as_utc_iso(self.last_lapcounter_update) if self.last_lapcounter_update else "",
                 "latest_lap_refresh": self.latest_lap_refresh,
                 "subsystems": {k: self._effective_subsystem_state(k).snapshot() for k in self.subsystems},
+                "ip_health": self.ip_health_snapshot(),
+                "warning_enabled": self.warning_enabled,
             }
 
 
@@ -1372,6 +1471,94 @@ class CrossMgrClient:
                 await asyncio.sleep(5)
 
 
+class PingMonitor:
+    def __init__(self, state: SharedState, addresses: list[str]) -> None:
+        self.state = state
+        self.addresses = addresses[:3]
+        self.logger = logging.getLogger("lapsrv.ping")
+        self.stop_event = asyncio.Event()
+        self.ping_path = which("ping") or "ping"
+        self.player_cmd = pick_audio_player()
+        self.player_warned = False
+        self.last_alert_at = 0.0
+        self.had_issue = False
+        pcm_a, sample_rate_a = build_tone_pcm(frequency=988.0, duration=0.12)
+        pcm_b, sample_rate_b = build_tone_pcm(frequency=1318.0, duration=0.12)
+        self.alert_wav_a = build_wave_bytes(pcm_a, sample_rate_a)
+        self.alert_wav_b = build_wave_bytes(pcm_b, sample_rate_b)
+        self.state.configure_ip_health(self.addresses)
+
+    async def stop(self) -> None:
+        self.stop_event.set()
+
+    async def _play_alert_tone(self) -> None:
+        if self.player_cmd is None:
+            if not self.player_warned:
+                self.logger.warning("no audio player found for ping alert; tried paplay, aplay, ffplay, play")
+                self.player_warned = True
+            return
+        try:
+            for wav_bytes in (self.alert_wav_a, self.alert_wav_b):
+                proc = await asyncio.create_subprocess_exec(
+                    *self.player_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate(wav_bytes)
+                await asyncio.sleep(0.08)
+        except Exception as exc:
+            self.logger.warning("ping alert tone failed: %s", exc)
+
+    async def _ping_once(self, address: str) -> None:
+        if not address:
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.ping_path, "-c", "1", "-W", "1", address,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                self.state.update_ip_health(address, False)
+                return
+            ok = proc.returncode == 0
+            rtt_ms = None
+            if ok:
+                match = re.search(rb"time=([0-9]+(?:\.[0-9]+)?)", stdout or b"")
+                if match:
+                    try:
+                        rtt_ms = float(match.group(1))
+                    except ValueError:
+                        rtt_ms = None
+            self.state.update_ip_health(address, ok, rtt_ms)
+        except Exception as exc:
+            self.logger.debug("ping failed for %s: %s", address, exc)
+            self.state.update_ip_health(address, False)
+
+    async def run(self) -> None:
+        if not self.addresses:
+            return
+        while not self.stop_event.is_set():
+            await asyncio.gather(*(self._ping_once(address) for address in self.addresses), return_exceptions=True)
+            has_issue = self.state.has_ip_health_issue()
+            if has_issue and not self.had_issue:
+                self.state.set_warning_enabled(True)
+                self.last_alert_at = 0.0
+            self.had_issue = has_issue
+            if self.state.warning_enabled and has_issue and (time.time() - self.last_alert_at) >= 5.0:
+                await self._play_alert_tone()
+                self.last_alert_at = time.time()
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+
+
 class WebServer:
     def __init__(self, state: SharedState, host: str, port: int) -> None:
         self.state = state
@@ -1388,6 +1575,7 @@ class WebServer:
         self.app.router.add_get("/category/{name}", self.handle_category)
         self.app.router.add_get("/api/state", self.handle_state)
         self.app.router.add_get("/api/category/{name}", self.handle_category_state)
+        self.app.router.add_post("/api/warning", self.handle_warning)
 
     async def start(self) -> None:
         self.runner = web.AppRunner(self.app)
@@ -1409,6 +1597,11 @@ class WebServer:
         snapshot["passings"] = self.state.category_passings(category)
         snapshot["selected_category"] = category
         return web.json_response(snapshot)
+
+    async def handle_warning(self, request: web.Request) -> web.Response:
+        payload = await request.json()
+        self.state.set_warning_enabled(bool(payload.get("enabled", True)))
+        return web.json_response({"ok": True, "warning_enabled": self.state.snapshot().get("warning_enabled", True)})
 
     async def handle_index(self, request: web.Request) -> web.Response:
         return web.Response(text=self._html(category=None), content_type="text/html")
@@ -1458,8 +1651,8 @@ main {{
   justify-content: space-between;
   align-items: flex-start;
   gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
+  flex-wrap: nowrap;
+  margin-bottom: 2px;
 }}
 .meta {{ color: var(--muted); font-size: 0.95rem; }}
 .statusbar {{
@@ -1472,23 +1665,54 @@ main {{
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  flex-wrap: wrap;
-  margin-top: -4px;
+  flex-wrap: nowrap;
+  margin-top: 0;
 }}
-.view-toggle, .audio-toggle {{
+.view-toggle, .audio-toggle, .warning-toggle {{
   border: 1px solid rgba(250,204,21,.45);
   background: rgba(250,204,21,.12);
   color: #92400e;
   border-radius: 999px;
-  padding: 7px 12px;
-  font-size: 0.92rem;
+  padding: 5px 10px;
+  font-size: 0.78rem;
   font-weight: 700;
   cursor: pointer;
+  width: 94px;
+  text-align: center;
+  white-space: nowrap;
+  line-height: 1.05;
 }}
-.audio-toggle.active {{
+.audio-toggle.active, .warning-toggle.active {{
   background: rgba(21,128,61,.12);
   border-color: rgba(21,128,61,.35);
   color: #166534;
+}}
+.ip-healthbar {{
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: -2px 0 8px;
+  padding-left: 2px;
+}}
+.ip-pill {{
+  border-radius: 2px;
+  padding: 3px 6px;
+  font-weight: 700;
+  font-size: 0.78rem;
+  line-height: 1.0;
+  border: 1px solid #94a3b8;
+}}
+.ip-pill.ok {{
+  background: rgba(34,197,94,.16);
+  color: #166534;
+}}
+.ip-pill.missed {{
+  background: rgba(245,158,11,.16);
+  color: #92400e;
+}}
+.ip-pill.down {{
+  background: #fbcfe8;
+  color: #9d174d;
 }}
 .badge {{
   display: inline-flex;
@@ -1616,12 +1840,19 @@ body.compact-mode .recent-group-rows {{
   table-layout: fixed;
 }}
 .compact-table th:nth-child(1), .compact-table td:nth-child(1) {{
-  width: 70px;
+  width: 72px;
   white-space: nowrap;
+  text-align: center;
 }}
-.compact-table th:nth-child(2), .compact-table td:nth-child(2) {{
-  width: 56px;
+.compact-table th:nth-child(3), .compact-table td:nth-child(3) {{
+  width: 88px;
   white-space: nowrap;
+  text-align: center;
+}}
+.compact-table th:nth-child(4), .compact-table td:nth-child(4) {{
+  width: 76px;
+  white-space: nowrap;
+  text-align: center;
 }}
 .compact-table th, .compact-table td {{
   padding: 8px 10px;
@@ -1650,16 +1881,9 @@ body.compact-mode .recent-group-rows {{
   background: #fbcfe8;
   color: #111827;
 }}
-.compact-group-next td {{
-  font-size: 1.2rem;
-  line-height: 1.05;
-}}
-.compact-group-next .compact-group-cell {{
-  font-size: 4.4rem;
-  line-height: 0.96;
-}}
-.compact-group-next .compact-hide-meta {{
-  display: none;
+.compact-group-lapped td, .compact-group-lapped .compact-group-cell {{
+  background: rgba(226, 232, 240, 0.22);
+  color: #475569;
 }}
 .compact-separator td {{
   padding: 0;
@@ -1711,8 +1935,11 @@ body.is-mobile .past-group-rows {{
 body.is-mobile .compact-table th:nth-child(1), body.is-mobile .compact-table td:nth-child(1) {{
   width: 62px;
 }}
-body.is-mobile .compact-table th:nth-child(2), body.is-mobile .compact-table td:nth-child(2) {{
-  width: 48px;
+body.is-mobile .compact-table th:nth-child(3), body.is-mobile .compact-table td:nth-child(3) {{
+  width: 74px;
+}}
+body.is-mobile .compact-table th:nth-child(4), body.is-mobile .compact-table td:nth-child(4) {{
+  width: 64px;
 }}
 body.is-mobile .compact-table th, body.is-mobile .compact-table td {{
   font-size: 0.95rem;
@@ -1721,13 +1948,6 @@ body.is-mobile .compact-table th, body.is-mobile .compact-table td {{
 body.is-mobile .compact-group-cell {{
   font-size: 2.1rem;
   line-height: 1.05;
-}}
-body.is-mobile .compact-group-next td {{
-  font-size: 1.1rem;
-}}
-body.is-mobile .compact-group-next .compact-group-cell {{
-  font-size: 4rem;
-  line-height: 0.94;
 }}
 body.is-mobile th:nth-child(6), body.is-mobile td:nth-child(6),
 body.is-mobile th:nth-child(8), body.is-mobile td:nth-child(8) {{ display: none; }}
@@ -1741,9 +1961,16 @@ body.is-desktop-portrait main {{
 body.is-desktop-portrait #event {{
   font-size: 1.1rem !important;
 }}
-body.is-desktop-portrait .view-toggle {{
-  font-size: 1.6rem;
-  padding: 10px 18px;
+body.is-desktop-portrait .warning-toggle,
+body.is-desktop-portrait .view-toggle,
+body.is-desktop-portrait .audio-toggle {{
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  width: 82px;
+  line-height: 1.0;
+}}
+body.is-desktop-portrait .toolbar {{
+  gap: 6px;
 }}
 body.is-desktop-portrait .group-table th, body.is-desktop-portrait .group-table td,
 body.is-desktop-portrait .compact-table th, body.is-desktop-portrait .compact-table td,
@@ -1753,16 +1980,15 @@ body.is-desktop-portrait th, body.is-desktop-portrait td {{
 body.is-desktop-portrait .compact-table th:nth-child(1), body.is-desktop-portrait .compact-table td:nth-child(1) {{
   width: 120px;
 }}
-body.is-desktop-portrait .compact-table th:nth-child(2), body.is-desktop-portrait .compact-table td:nth-child(2) {{
-  width: 96px;
+body.is-desktop-portrait .compact-table th:nth-child(3), body.is-desktop-portrait .compact-table td:nth-child(3) {{
+  width: 150px;
+}}
+body.is-desktop-portrait .compact-table th:nth-child(4), body.is-desktop-portrait .compact-table td:nth-child(4) {{
+  width: 120px;
 }}
 body.is-desktop-portrait .compact-group-cell {{
   font-size: 2.8rem;
   line-height: 1.0;
-}}
-body.is-desktop-portrait .compact-group-next .compact-group-cell {{
-  font-size: 4.2rem;
-  line-height: 0.94;
 }}
 </style>
 </head>
@@ -1771,8 +1997,10 @@ body.is-desktop-portrait .compact-group-next .compact-group-cell {{
   <div class="title">
     <div>
       <h1 id="event" style="margin:0;font-size:1.1rem;line-height:1.1;">lapsrv</h1>
+      <div class="ip-healthbar" id="ipHealthBar"></div>
     </div>
     <div class="toolbar">
+      <button class="warning-toggle" id="warningToggle" type="button" style="display:none;">Warning On</button>
       <button class="view-toggle" id="viewToggle" type="button">Compact View</button>
       <button class="audio-toggle" id="audioToggle" type="button">Tone Off</button>
     </div>
@@ -1824,12 +2052,14 @@ function esc(s) {{
 }}
 function shortCategory(name) {{
   return (name || '')
-    .replaceAll(' (Men)', '(M)')
-    .replaceAll(' (Women)', '(W)')
-    .replaceAll(' (Open)', '(O)');
+    .replaceAll(' (Men)', '')
+    .replaceAll(' (Open)', '')
+    .replaceAll(' (Women)', '-W');
 }}
-function compactNote(note) {{
-  return (note || '').replaceAll('st', '').replaceAll('nd', '').replaceAll('rd', '').replaceAll('th', '').replaceAll(':', '-');
+function compactPos(note) {{
+  const raw = (note || '').trim();
+  if (!raw) return '';
+  return raw.includes(':') ? raw.split(':', 1)[0] : raw;
 }}
 function topGroupBellKey(groupTable) {{
   const headers = groupTable.headers || [];
@@ -1899,39 +2129,70 @@ function compactGroupTableHtml(groupTable) {{
   const headers = groupTable.headers || [];
   const rows = groupTable.rows || [];
   const headerStatus = groupTable.header_status || {{}};
-  let currentElapsed = '';
-  let currentGap = '';
-  let groupIndex = -1;
-  const lines = [];
-  rows.forEach((row, rowIndex) => {{
-    if (row.elapsed_text) {{
-      groupIndex += 1;
-      if (rowIndex > 0) lines.push('<tr class="compact-separator"><td colspan="3"></td></tr>');
-      currentElapsed = row.elapsed_text;
-      currentGap = row.group_gap || '';
-    }}
+  const merged = new Map();
+
+  rows.forEach(row => {{
     headers.forEach(h => {{
       const cell = (row.cells || {{}})[h];
       if (!cell) return;
-      const note = compactNote(cell.note || cell.text || '');
-      const count = (cell.count || 0) > 1 ? `:${{cell.count}}` : '';
       const status = headerStatus[h] || {{}};
-      const lapsToGo = status.is_bell ? '1' : (status.text || '');
-      const lapsText = lapsToGo ? ` (${{esc(lapsToGo)}})` : '';
-      const groupText = `${{esc(shortCategory(h))}} ${{esc(note)}}${{esc(count)}}${{lapsText}}`.trim();
-      const rowClasses = [];
-      if (groupIndex === 0) rowClasses.push('compact-group-next');
-      if (status.is_bell) rowClasses.push('compact-group-bell');
-      if (cell.is_lead) rowClasses.push('compact-group-lead');
-      const rowClass = rowClasses.join(' ');
-      if (groupIndex === 0) {{
-        lines.push(`<tr class="${{rowClass}}"><td class="compact-group-cell" colspan="3">${{groupText}}</td></tr>`);
+      const deficitCounts = cell.deficit_counts || {{}};
+      const deficitKeys = Object.keys(deficitCounts).map(v => Number(v)).sort((a, b) => a - b);
+      if (deficitKeys.length) {{
+        deficitKeys.forEach(deficit => {{
+          const countValue = Number(deficitCounts[deficit] || 0);
+          if (!countValue) return;
+          const lapText = deficit > 0 ? `(-${{deficit}})` : (status.is_bell ? '1' : (status.text || ''));
+          const key = `${{h}}|${{lapText}}`;
+          const posText = compactPos(cell.note || cell.text || '');
+          const existing = merged.get(key) || {{
+            lapText,
+            categoryText: shortCategory(h),
+            posText,
+            count: 0,
+            isBell: false,
+            isLead: false,
+            isLapped: deficit > 0,
+          }};
+          existing.count += countValue;
+          if (!existing.posText || (posText && posText.length < existing.posText.length)) existing.posText = posText;
+          existing.isBell = existing.isBell || (deficit === 0 && status.is_bell);
+          existing.isLead = existing.isLead || (deficit === 0 && cell.is_lead);
+          existing.isLapped = existing.isLapped || deficit > 0;
+          merged.set(key, existing);
+        }});
       }} else {{
-        lines.push(`<tr class="${{rowClass}}"><td>${{esc(currentElapsed)}}</td><td>${{esc(currentGap)}}</td><td class="compact-group-cell">${{groupText}}</td></tr>`);
+        const lapText = status.is_bell ? '1' : (status.text || '');
+        const key = `${{h}}|${{lapText}}`;
+        const posText = compactPos(cell.note || cell.text || '');
+        const existing = merged.get(key) || {{
+          lapText,
+          categoryText: shortCategory(h),
+          posText,
+          count: 0,
+          isBell: false,
+          isLead: false,
+          isLapped: false,
+        }};
+        existing.count += Number(cell.count || 0);
+        if (!existing.posText || (posText && posText.length < existing.posText.length)) existing.posText = posText;
+        existing.isBell = existing.isBell || status.is_bell;
+        existing.isLead = existing.isLead || cell.is_lead;
+        merged.set(key, existing);
       }}
     }});
   }});
-  return `<table class="compact-table"><thead><tr><th>HH:MM:SS</th><th>Gap</th><th>Group</th></tr></thead><tbody>${{lines.join('')}}</tbody></table>`;
+
+  const lines = [];
+  Array.from(merged.values()).forEach(entry => {{
+    const rowClasses = [];
+    if (entry.isBell) rowClasses.push('compact-group-bell');
+    if (entry.isLead) rowClasses.push('compact-group-lead');
+    if (entry.isLapped) rowClasses.push('compact-group-lapped');
+    const rowClass = rowClasses.join(' ');
+    lines.push(`<tr class="${{rowClass}}"><td>${{esc(entry.lapText)}}</td><td class="compact-group-cell">${{esc(entry.categoryText)}}</td><td>${{esc(entry.posText)}}</td><td>${{esc(String(entry.count))}}</td></tr>`);
+  }});
+  return `<table class="compact-table"><thead><tr><th>Lap</th><th>Category</th><th>Note</th><th>Count</th></tr></thead><tbody>${{lines.join('')}}</tbody></table>`;
 }}
 function applyViewMode() {{
   document.body.classList.toggle('compact-mode', compactMode);
@@ -1943,6 +2204,19 @@ function updateAudioButton() {{
   if (!button) return;
   button.textContent = audioEnabled ? 'Tone On' : 'Tone Off';
   button.classList.toggle('active', audioEnabled);
+}}
+function updateWarningButton(enabled, visible) {{
+  if (!warningToggle) return;
+  warningToggle.style.display = visible ? '' : 'none';
+  warningToggle.textContent = enabled ? 'Warning On' : 'Warning Off';
+  warningToggle.classList.toggle('active', enabled);
+}}
+async function setWarningEnabled(enabled) {{
+  await fetch('/api/warning', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ enabled }}),
+  }});
 }}
 function applyDeviceClass() {{
   const ua = navigator.userAgent || '';
@@ -1991,6 +2265,9 @@ function statusHtml(s) {{
   const endpoint = s.endpoint ? ` ${{esc(s.endpoint)}}` : '';
   return `<span class="badge state-${{esc(s.state)}}">${{esc(s.name)}} [${{esc(s.state)}}]${{endpoint}}</span>`;
 }}
+function ipHealthHtml(items) {{
+  return (items || []).map(item => `<span class="ip-pill ${{esc(item.state)}}">${{esc(item.address)}}</span>`).join('');
+}}
 function rowHtml(r) {{
   return `<tr>
     <td>${{esc(r.bib)}}</td>
@@ -2008,12 +2285,19 @@ const tableWrap = document.getElementById('tableWrap');
 const recentGroupRowsWrap = document.getElementById('recentGroupRows');
 const pastGroupRowsWrap = document.getElementById('pastGroupRows');
 const compactRecentRowsWrap = document.getElementById('compactRecentRows');
+const warningToggle = document.getElementById('warningToggle');
 const viewToggle = document.getElementById('viewToggle');
 const audioToggle = document.getElementById('audioToggle');
+const ipHealthBar = document.getElementById('ipHealthBar');
 applyDeviceClass();
 applyViewMode();
 updateAudioButton();
 window.addEventListener('resize', applyDeviceClass);
+warningToggle.addEventListener('click', async () => {{
+  const enabled = !(warningToggle.classList.contains('active'));
+  await setWarningEnabled(enabled);
+  updateWarningButton(enabled, true);
+}});
 viewToggle.addEventListener('click', () => {{
   compactMode = !compactMode;
   localStorage.setItem('lapsrv_compact_mode', compactMode ? '1' : '0');
@@ -2042,6 +2326,8 @@ async function refresh() {{
   const res = await fetch(apiPath, {{cache: 'no-store'}});
   const data = await res.json();
   document.getElementById('event').textContent = data.event_name || 'lapsrv';
+  ipHealthBar.innerHTML = ipHealthHtml(data.ip_health || []);
+  updateWarningButton(!!data.warning_enabled, (data.ip_health || []).length > 0);
   const subsystems = data.subsystems || {{}};
   const recentGroupTable = data.recent_group_table || {{headers: [], header_status: {{}}, rows: []}};
   recentGroupRowsWrap.innerHTML = groupTableHtml(recentGroupTable);
@@ -2110,6 +2396,9 @@ class TkMonitor:
         header = ttk.Label(root, text="lapsrv", font=("TkDefaultFont", 18, "bold"))
         header.pack(fill="x", padx=8, pady=(8, 4))
 
+        ip_frame = tk.Frame(root)
+        ip_frame.pack(fill="x", padx=8, pady=(0, 4))
+
         recent_frame = ttk.LabelFrame(root, text="Recent Groups")
         recent_frame.pack(fill="both", expand=True, padx=8, pady=(8, 4))
         recent_group_text = tk.Text(recent_frame, wrap="none", height=15, font=("Courier New", 15), state="disabled")
@@ -2165,6 +2454,13 @@ class TkMonitor:
                 status_parts.append(f"{sub['name']} [{sub['state']}]{{{endpoint.strip()}}}" if endpoint else f"{sub['name']} [{sub['state']}]")
             status_text = "   ".join(status_parts)
             header.config(text=f"{snap['event_name'] or 'lapsrv'}    Race {snap['current_race_time'] or ''}    {status_text}")
+            for child in ip_frame.winfo_children():
+                child.destroy()
+            for item in snap.get("ip_health", []):
+                bg = "#86efac" if item.get("state") == "ok" else ("#fde68a" if item.get("state") == "missed" else "#fbcfe8")
+                fg = "#111827"
+                lbl = tk.Label(ip_frame, text=item.get("address", ""), bg=bg, fg=fg, padx=10, pady=4, relief="groove", borderwidth=1)
+                lbl.pack(side="left", padx=(0, 6))
 
             def render_group_text(widget: tk.Text, group_table: dict[str, Any]) -> None:
                 headers = group_table.get("headers", [])
@@ -2285,6 +2581,7 @@ class LapsrvApp:
         self.jchip = JChipServer(self.state, args.listen_host, args.port)
         self.crossmgr = CrossMgrClient(self.state, args.crossmgr_host, args.crossmgr_port)
         self.web = WebServer(self.state, args.web_host, args.web)
+        self.ping = PingMonitor(self.state, list(args.ip_address or []))
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.tk = TkMonitor(self.state, on_close=self.request_stop)
         self.stop_event = asyncio.Event()
@@ -2322,18 +2619,21 @@ class LapsrvApp:
         await self.jchip.start()
         await self.web.start()
         crossmgr_task = asyncio.create_task(self.crossmgr.run(), name="crossmgr-client")
+        ping_task = asyncio.create_task(self.ping.run(), name="ping-monitor")
         try:
             await self.stop_event.wait()
         finally:
             self.logger.info("shutdown: begin")
             await self._stop_with_timeout("crossmgr", self.crossmgr.stop())
+            await self._stop_with_timeout("ping", self.ping.stop())
             self.logger.info("shutdown: cancelling crossmgr task")
             crossmgr_task.cancel()
+            ping_task.cancel()
             try:
-                await asyncio.wait_for(asyncio.gather(crossmgr_task, return_exceptions=True), timeout=2.0)
-                self.logger.info("shutdown: crossmgr task cancelled")
+                await asyncio.wait_for(asyncio.gather(crossmgr_task, ping_task, return_exceptions=True), timeout=2.0)
+                self.logger.info("shutdown: background tasks cancelled")
             except asyncio.TimeoutError:
-                self.logger.warning("shutdown: timed out waiting for crossmgr task")
+                self.logger.warning("shutdown: timed out waiting for background tasks")
             await self._stop_with_timeout("web", self.web.stop())
             await self._stop_with_timeout("jchip", self.jchip.stop())
             self.logger.info("shutdown: complete")
@@ -2347,6 +2647,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--web", type=int, default=DEFAULT_WEB_PORT, help=f"Web UI port, default {DEFAULT_WEB_PORT}")
     parser.add_argument("--listen-host", default="0.0.0.0", help="JChip listen host, default 0.0.0.0")
     parser.add_argument("--web-host", default="0.0.0.0", help="Web listen host, default 0.0.0.0")
+    parser.add_argument("--ip_address", nargs="*", default=[], help="Up to three IP addresses to ping once per second")
     parser.add_argument("--no-gui", action="store_true", help="Disable the tkinter window")
     parser.add_argument(
         "--show_unknown_tags",
@@ -2366,6 +2667,8 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     args.crossmgr_host, args.crossmgr_port = parse_host_port(args.crossmgr, DEFAULT_CROSSMGR_PORT)
+    if len(args.ip_address) > 3:
+        parser.error("--ip_address accepts at most 3 addresses")
 
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
