@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import bisect
+import csv
 import datetime as dt
 import json
 import logging
@@ -13,6 +14,7 @@ import queue
 import re
 import struct
 import subprocess
+import sys
 import wave
 import signal
 import socket
@@ -61,20 +63,28 @@ def ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def format_clock(seconds: Optional[float]) -> str:
+def _format_clock_precise(seconds: Optional[float], decimals: int) -> str:
     if seconds is None:
         return ""
     sign = "-" if seconds < 0 else ""
     seconds = abs(seconds)
-    total = int(seconds)
-    frac = int(round((seconds - total) * 100))
-    h, rem = divmod(total, 3600)
+    scale = 10 ** decimals
+    total_units = int(round(seconds * scale))
+    total_seconds, frac = divmod(total_units, scale)
+    h, rem = divmod(total_seconds, 3600)
     m, s = divmod(rem, 60)
+    frac_text = f".{frac:0{decimals}d}" if decimals else ""
     if h:
-        return f"{sign}{h}:{m:02d}:{s:02d}"
-    if frac:
-        return f"{sign}{m}:{s:02d}.{frac:02d}"
-    return f"{sign}{m}:{s:02d}"
+        return f"{sign}{h}:{m:02d}:{s:02d}{frac_text}"
+    return f"{sign}{m}:{s:02d}{frac_text}"
+
+
+def format_clock(seconds: Optional[float]) -> str:
+    return _format_clock_precise(seconds, 2)
+
+
+def format_clock_ms(seconds: Optional[float]) -> str:
+    return _format_clock_precise(seconds, 3)
 
 
 def format_eta(seconds: Optional[float]) -> str:
@@ -273,6 +283,7 @@ class IPHealthStatus:
         }
 
 
+@dataclass(slots=True)
 class RiderRuntimeState:
     bib: str
     predicted_lap: Optional[int] = None
@@ -290,6 +301,7 @@ class RaceConfig:
         self.event_name = ""
         self.event_date = ""
         self.timezone = ""
+        self.time_trial = False
         self.categories: dict[str, CategoryConfig] = {}
         self.riders_by_tag: dict[str, RiderInfo] = {}
         self.riders_by_bib: dict[str, RiderInfo] = {}
@@ -344,6 +356,7 @@ class RaceConfig:
             cfg.event_name = str(rec.get("Event Name") or "").strip()
             cfg.event_date = str(rec.get("Event Date") or "").strip()
             cfg.timezone = str(rec.get("TimeZone") or "").strip()
+            cfg.time_trial = bool(rec.get("Time Trial"))
 
         return cfg
 
@@ -375,6 +388,9 @@ class SharedState:
         }
         self.ip_health: dict[str, IPHealthStatus] = {}
         self.warning_enabled = True
+        self.tt_export_path: Optional[Path] = None
+        self.tt_exported_keys: set[str] = set()
+        self.tt_diag_logged: set[str] = set()
 
     def effective_category_config(self, category: str) -> CategoryConfig:
         base = self.config.categories.get(category, CategoryConfig(name=category))
@@ -390,6 +406,23 @@ class SharedState:
             if self.race_clock_wall is None:
                 return self.race_clock_value
             return max(0.0, self.race_clock_value + (time.time() - self.race_clock_wall))
+
+    def is_time_trial(self) -> bool:
+        with self.lock:
+            return bool(self.config.time_trial or self.reference.get("isTimeTrial"))
+
+    def tt_start_offset(self, bib: str) -> Optional[float]:
+        result = self.results_by_bib.get(str(bib), {})
+        if result.get("startTime") not in (None, ""):
+            try:
+                return float(result.get("startTime"))
+            except (TypeError, ValueError):
+                pass
+        rider = self.config.riders_by_bib.get(str(bib))
+        return rider.start_time if rider and rider.start_time is not None else None
+
+    def tt_export_csv_path(self) -> Optional[Path]:
+        return self.tt_export_path
 
     def set_subsystem_status(self, key: str, state: str, endpoint: Optional[str] = None, detail: str = "") -> None:
         with self.lock:
@@ -435,6 +468,8 @@ class SharedState:
         self.rider_runtime.clear()
         self.last_announcer_update = None
         self.last_lapcounter_update = None
+        self.tt_exported_keys.clear()
+        self.tt_diag_logged.clear()
 
     def reset_for_reader_reconnect(self, reader: str = "") -> None:
         with self.lock:
@@ -487,8 +522,10 @@ class SharedState:
             cur_race_time = self.reference.get("curRaceTime")
             if cur_race_time is not None:
                 try:
-                    self.race_clock_value = float(cur_race_time)
-                    self.race_clock_wall = time.time()
+                    new_clock_value = float(cur_race_time)
+                    if self.race_clock_value is None or abs(new_clock_value - self.race_clock_value) > 1e-6:
+                        self.race_clock_value = new_clock_value
+                        self.race_clock_wall = time.time()
                 except (TypeError, ValueError):
                     pass
             self._last_version_count = new_version_count if new_version_count is not None else self._last_version_count
@@ -667,11 +704,24 @@ class SharedState:
         if current_race_time is None:
             return {}
         recorded: dict[str, dict[str, Any]] = {}
+        is_time_trial = bool(self.reference.get("isTimeTrial") or self.config.time_trial)
         for bib, result in self.results_by_bib.items():
             if not result:
                 continue
             status = str(result.get("status") or "").strip()
             race_times = self._race_times(result)
+            interp = self._interp_flags(result)
+            if is_time_trial:
+                if status not in {"Finisher", "NP"} or not race_times:
+                    continue
+                last_index = len(race_times) - 1
+                if last_index < 0:
+                    continue
+                if last_index < len(interp) and interp[last_index]:
+                    continue
+                offset = float(result.get("startTime") or 0.0)
+                recorded[str(bib)] = {"lap": int(last_index), "t": float(race_times[last_index] + offset)}
+                continue
             if status != "Finisher" or len(race_times) < 2:
                 continue
             progress = self._result_progress(result, current_race_time)
@@ -1170,6 +1220,107 @@ class SharedState:
             {"headers": category_order, "header_status": header_status, "rows": past_rows},
         )
 
+    def _tt_row_from_passing(self, passing: PassingRecord, official_race_time: Optional[float]) -> dict[str, Any]:
+        rider = self.config.riders_by_bib.get(str(passing.bib))
+        start_time = self.tt_start_offset(str(passing.bib))
+        race_time = passing.race_time
+        elapsed_base = official_race_time if official_race_time is not None else race_time
+        elapsed = None if elapsed_base is None or start_time is None else max(0.0, elapsed_base - start_time)
+        return {
+            "race_time": format_clock(race_time),
+            "race_time_csv": format_clock_ms(race_time),
+            "start_time": format_clock(start_time),
+            "start_time_csv": format_clock_ms(start_time),
+            "stop_time": format_clock(official_race_time),
+            "stop_time_csv": format_clock_ms(official_race_time),
+            "elapsed": format_clock(elapsed),
+            "elapsed_csv": format_clock_ms(elapsed),
+            "bib": str(passing.bib),
+            "last_name": rider.last_name if rider else "",
+            "first_name": rider.first_name if rider else "",
+            "category": rider.category if rider else "",
+            "team": rider.team if rider else "",
+            "sort_time": race_time if race_time is not None else (official_race_time if official_race_time is not None else -1.0),
+        }
+
+    def _append_tt_completion_csv(self, row: dict[str, Any]) -> None:
+        if not self.tt_export_path:
+            return
+        self.tt_export_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not self.tt_export_path.exists() or self.tt_export_path.stat().st_size == 0
+        with self.tt_export_path.open("a", newline="") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(["race_time", "bib", "start_time", "stop_time", "elapsed", "last_name", "first_name", "category", "team"])
+            writer.writerow([
+                row.get("race_time_csv", row.get("race_time", "")),
+                row.get("bib", ""),
+                row.get("start_time_csv", row.get("start_time", "")),
+                row.get("stop_time_csv", row.get("stop_time", "")),
+                row.get("elapsed_csv", row.get("elapsed", "")),
+                row.get("last_name", ""),
+                row.get("first_name", ""),
+                row.get("category", ""),
+                row.get("team", ""),
+            ])
+
+    def tt_tables(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        with self.lock:
+            current_race_time = self.current_race_time()
+            recorded = self._announcer_recorded_map(current_race_time)
+            latest_by_bib: dict[str, PassingRecord] = {}
+            for passing in self.passings:
+                latest_by_bib[str(passing.bib)] = passing
+            active_rows: list[dict[str, Any]] = []
+            completed_rows: list[dict[str, Any]] = []
+            is_tt = self.is_time_trial()
+            for bib, passing in latest_by_bib.items():
+                rec = recorded.get(bib)
+                rec_t = rec.get("t") if rec else None
+                is_completed = False
+                if rec_t is not None:
+                    if is_tt:
+                        is_completed = True
+                    elif passing.race_time is not None and float(rec_t) >= float(passing.race_time):
+                        is_completed = True
+                if is_completed:
+                    row = self._tt_row_from_passing(passing, float(rec_t))
+                    completed_rows.append(row)
+                    export_key = f"{bib}:{row['race_time']}"
+                    if export_key not in self.tt_exported_keys:
+                        self._append_tt_completion_csv(row)
+                        self.tt_exported_keys.add(export_key)
+                else:
+                    active_rows.append(self._tt_row_from_passing(passing, passing.race_time))
+                    if bib not in self.tt_diag_logged:
+                        result = self.results_by_bib.get(str(bib))
+                        if result:
+                            race_times = self._race_times(result)
+                            interp = self._interp_flags(result)
+                            logging.getLogger("lapsrv.tt").warning(
+                                "tt unresolved bib=%s status=%s startTime=%r raceTimes_tail=%s interp_tail=%s rec=%s early=%s",
+                                bib,
+                                result.get("status"),
+                                result.get("startTime"),
+                                race_times[-3:],
+                                interp[-3:],
+                                rec,
+                                passing.race_time,
+                            )
+                        else:
+                            logging.getLogger("lapsrv.tt").warning(
+                                "tt unresolved bib=%s no announcer result early=%s",
+                                bib,
+                                passing.race_time,
+                            )
+                        self.tt_diag_logged.add(bib)
+        active_rows.sort(key=lambda r: r.get("sort_time") or -1.0, reverse=True)
+        completed_rows.sort(key=lambda r: r.get("sort_time") or -1.0, reverse=True)
+        for rows in (active_rows, completed_rows):
+            for row in rows:
+                row.pop("sort_time", None)
+        return active_rows, completed_rows
+
     def recent_group_table(self) -> dict[str, Any]:
         recent, _past = self._build_group_tables()
         return recent
@@ -1209,11 +1360,17 @@ class SharedState:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             current_race_time = self.current_race_time()
+            tt_active_rows, tt_completed_rows = self.tt_tables() if self.is_time_trial() else ([], [])
             return {
                 "event_name": self.config.event_name,
                 "event_date": self.config.event_date,
                 "timezone": self.config.timezone,
                 "current_race_time": format_clock(current_race_time),
+                "cur_race_time": format_clock(current_race_time),
+                "is_time_trial": self.is_time_trial(),
+                "tt_active_rows": tt_active_rows,
+                "tt_completed_rows": tt_completed_rows,
+                "tt_csv_path": str(self.tt_export_csv_path() or ""),
                 "recent_group_table": self.recent_group_table(),
                 "past_group_table": self.past_group_table(),
                 "passings": [p.as_dict() for p in self.passings],
@@ -1636,8 +1793,15 @@ body {{
   background: linear-gradient(180deg, #fefefe 0%, #eef6ff 100%);
   color: var(--fg);
 }}
-body.compact-mode .default-view {{ display: none; }}
-body:not(.compact-mode) .compact-view {{ display: none; }}
+body.compact-mode .default-view, body.compact-mode .tt-view {{ display: none; }}
+body.tt-mode .default-view, body.tt-mode .compact-view {{ display: none; }}
+body:not(.compact-mode):not(.tt-mode) .compact-view, body:not(.compact-mode):not(.tt-mode) .tt-view {{ display: none; }}
+body.compact-mode {{
+  overflow: hidden;
+}}
+body.tt-mode {{
+  overflow: hidden;
+}}
 main {{
   max-width: 1400px;
   margin: 0 auto;
@@ -1646,13 +1810,31 @@ main {{
   display: flex;
   flex-direction: column;
 }}
+body.compact-mode main {{
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+}}
 .title {{
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: flex-start;
   gap: 8px;
-  flex-wrap: nowrap;
   margin-bottom: 2px;
+}}
+.title-left {{
+  justify-self: start;
+}}
+.title-center {{
+  justify-self: center;
+  text-align: center;
+}}
+.compact-race-time {{
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--fg);
+  white-space: nowrap;
 }}
 .meta {{ color: var(--muted); font-size: 0.95rem; }}
 .statusbar {{
@@ -1668,6 +1850,19 @@ main {{
   flex-wrap: nowrap;
   margin-top: 0;
 }}
+.tt-indicator {{
+  border: 1px solid rgba(21,128,61,.35);
+  background: rgba(21,128,61,.12);
+  color: #166534;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  width: 52px;
+  text-align: center;
+  white-space: nowrap;
+  line-height: 1.05;
+}}
 .view-toggle, .audio-toggle, .warning-toggle {{
   border: 1px solid rgba(250,204,21,.45);
   background: rgba(250,204,21,.12);
@@ -1681,6 +1876,25 @@ main {{
   text-align: center;
   white-space: nowrap;
   line-height: 1.05;
+}}
+.compact-toggle {{
+  border: 1px solid rgba(148,163,184,.45);
+  background: rgba(148,163,184,.12);
+  color: #334155;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  width: 98px;
+  text-align: center;
+  white-space: nowrap;
+  line-height: 1.05;
+}}
+.compact-toggle.active {{
+  background: rgba(21,128,61,.12);
+  border-color: rgba(21,128,61,.35);
+  color: #166534;
 }}
 .audio-toggle.active, .warning-toggle.active {{
   background: rgba(21,128,61,.12);
@@ -1768,9 +1982,20 @@ main {{
 body.compact-mode .recent-group-rows {{
   height: auto;
   flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }}
 .past-group-rows {{
   height: 26vh;
+}}
+.group-table, .small-table, .tt-table {{
+  background: rgba(255,255,255,.98);
+}}
+.group-table tbody tr, .small-table tbody tr, .tt-table tbody tr {{
+  background: rgba(255,255,255,.98);
+}}
+.tt-scroll, .table-wrap {{
+  background: rgba(255,255,255,.98);
 }}
 .group-table {{
   width: 100%;
@@ -1786,7 +2011,8 @@ body.compact-mode .recent-group-rows {{
 .group-table th {{
   position: sticky;
   top: 0;
-  background: rgba(31,41,55,.98);
+  background: rgba(229,238,247,.98);
+  color: #0f172a;
   z-index: 1;
 }}
 .group-table thead tr:nth-child(2) th {{
@@ -1831,6 +2057,7 @@ body.compact-mode .recent-group-rows {{
   border-radius: 14px;
   overflow: hidden;
   flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }}
@@ -1853,6 +2080,34 @@ body.compact-mode .recent-group-rows {{
   width: 76px;
   white-space: nowrap;
   text-align: center;
+}}
+.compact-table-separate th:nth-child(1), .compact-table-separate td:nth-child(1) {{
+  width: 56px;
+  white-space: nowrap;
+  text-align: center;
+}}
+.compact-table-separate th:nth-child(2), .compact-table-separate td:nth-child(2) {{
+  width: auto;
+  text-align: left;
+}}
+.compact-table-separate th:nth-child(3), .compact-table-separate td:nth-child(3) {{
+  width: 92px;
+  white-space: nowrap;
+  text-align: center;
+}}
+.compact-table-separate th:nth-child(4), .compact-table-separate td:nth-child(4) {{
+  width: 76px;
+  white-space: nowrap;
+  text-align: center;
+}}
+.compact-table-separate th:nth-child(5), .compact-table-separate td:nth-child(5) {{
+  width: 84px;
+  white-space: nowrap;
+  text-align: right;
+}}
+.compact-table-separate .compact-group-cell {{
+  font-size: 1.95rem;
+  line-height: 1.0;
 }}
 .compact-table th, .compact-table td {{
   padding: 8px 10px;
@@ -1882,8 +2137,8 @@ body.compact-mode .recent-group-rows {{
   color: #111827;
 }}
 .compact-group-lapped td, .compact-group-lapped .compact-group-cell {{
-  background: rgba(226, 232, 240, 0.22);
-  color: #475569;
+  background: rgba(226, 232, 240, 0.55);
+  color: #64748b;
 }}
 .compact-separator td {{
   padding: 0;
@@ -1906,7 +2161,8 @@ th, td {{
   font-size: 0.95rem;
 }}
 th {{
-  background: rgba(31,41,55,.98);
+  background: rgba(229,238,247,.98);
+  color: #0f172a;
   position: sticky;
   top: 0;
 }}
@@ -1941,6 +2197,21 @@ body.is-mobile .compact-table th:nth-child(3), body.is-mobile .compact-table td:
 body.is-mobile .compact-table th:nth-child(4), body.is-mobile .compact-table td:nth-child(4) {{
   width: 64px;
 }}
+body.is-mobile .compact-table-separate th:nth-child(1), body.is-mobile .compact-table-separate td:nth-child(1) {{
+  width: 48px;
+}}
+body.is-mobile .compact-table-separate th:nth-child(3), body.is-mobile .compact-table-separate td:nth-child(3) {{
+  width: 72px;
+}}
+body.is-mobile .compact-table-separate th:nth-child(4), body.is-mobile .compact-table-separate td:nth-child(4) {{
+  width: 60px;
+}}
+body.is-mobile .compact-table-separate th:nth-child(5), body.is-mobile .compact-table-separate td:nth-child(5) {{
+  width: 72px;
+}}
+body.is-mobile .compact-table-separate .compact-group-cell {{
+  font-size: 1.8rem;
+}}
 body.is-mobile .compact-table th, body.is-mobile .compact-table td {{
   font-size: 0.95rem;
   padding: 8px 6px;
@@ -1963,7 +2234,8 @@ body.is-desktop-portrait #event {{
 }}
 body.is-desktop-portrait .warning-toggle,
 body.is-desktop-portrait .view-toggle,
-body.is-desktop-portrait .audio-toggle {{
+body.is-desktop-portrait .audio-toggle,
+body.is-desktop-portrait .compact-toggle {{
   font-size: 0.72rem;
   padding: 4px 8px;
   width: 82px;
@@ -1971,6 +2243,9 @@ body.is-desktop-portrait .audio-toggle {{
 }}
 body.is-desktop-portrait .toolbar {{
   gap: 6px;
+}}
+body.is-desktop-portrait .compact-race-time {{
+  font-size: 1.44rem;
 }}
 body.is-desktop-portrait .group-table th, body.is-desktop-portrait .group-table td,
 body.is-desktop-portrait .compact-table th, body.is-desktop-portrait .compact-table td,
@@ -1986,27 +2261,144 @@ body.is-desktop-portrait .compact-table th:nth-child(3), body.is-desktop-portrai
 body.is-desktop-portrait .compact-table th:nth-child(4), body.is-desktop-portrait .compact-table td:nth-child(4) {{
   width: 120px;
 }}
+body.is-desktop-portrait .compact-table-separate th:nth-child(1), body.is-desktop-portrait .compact-table-separate td:nth-child(1) {{
+  width: 72px;
+}}
+body.is-desktop-portrait .compact-table-separate th:nth-child(3), body.is-desktop-portrait .compact-table-separate td:nth-child(3) {{
+  width: 128px;
+}}
+body.is-desktop-portrait .compact-table-separate th:nth-child(4), body.is-desktop-portrait .compact-table-separate td:nth-child(4) {{
+  width: 96px;
+}}
+body.is-desktop-portrait .compact-table-separate th:nth-child(5), body.is-desktop-portrait .compact-table-separate td:nth-child(5) {{
+  width: 120px;
+}}
+body.is-desktop-portrait .compact-table-separate .compact-group-cell {{
+  font-size: 2.35rem;
+}}
 body.is-desktop-portrait .compact-group-cell {{
   font-size: 2.8rem;
   line-height: 1.0;
+}}
+.tt-wrap {{
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}}
+.tt-pane {{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}}
+.tt-pane-top {{
+  flex: 0 0 auto;
+}}
+.tt-pane-bottom {{
+  flex: 1 1 0;
+  min-height: 0;
+}}
+.tt-pane-title {{
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}}
+.tt-table {{
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 1rem;
+}}
+.tt-table col.tt-col-race {{ width: 9ch; }}
+.tt-table col.tt-col-bib {{ width: 5ch; }}
+.tt-table col.tt-col-start {{ width: 8ch; }}
+.tt-table col.tt-col-stop {{ width: 9ch; }}
+.tt-table col.tt-col-elapsed {{ width: 9ch; }}
+.tt-table col.tt-col-name {{ width: 24ch; }}
+.tt-table th, .tt-table td {{
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.tt-table th {{
+  background: var(--panel-2);
+  position: sticky;
+  top: 0;
+}}
+.tt-table th.tt-sortable {{
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}}
+.tt-table th.tt-sortable:hover {{
+  background: rgba(214, 228, 241, 0.98);
+}}
+.tt-table th.tt-num, .tt-table td.tt-num {{
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}}
+.tt-pane-bottom .tt-table tbody tr:nth-child(odd) {{
+  background: rgba(255,255,255,.98);
+}}
+.tt-pane-bottom .tt-table tbody tr:nth-child(even) {{
+  background: rgba(243,246,249,.98);
+}}
+.tt-scroll {{
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}}
+.tt-pane-top .tt-scroll {{
+  overflow-y: visible;
+  overflow-x: auto;
+  flex: 0 0 auto;
+}}
+.tt-pane-bottom .tt-scroll {{
+  overflow-y: auto;
+  overflow-x: auto;
+  flex: 1 1 auto;
+  min-height: 0;
 }}
 </style>
 </head>
 <body>
 <main>
   <div class="title">
-    <div>
-      <h1 id="event" style="margin:0;font-size:1.1rem;line-height:1.1;">lapsrv</h1>
+    <div class="title-left">
+      <div class="compact-race-time" id="compactRaceTime">00:00:00</div>
       <div class="ip-healthbar" id="ipHealthBar"></div>
     </div>
+    <div class="title-center">
+      <h1 id="event" style="margin:0;font-size:1.1rem;line-height:1.1;">lapsrv</h1>
+    </div>
     <div class="toolbar">
+      <div class="tt-indicator" id="ttIndicator" style="display:none;">TT</div>
       <button class="warning-toggle" id="warningToggle" type="button" style="display:none;">Warning On</button>
+      <button class="compact-toggle" id="compactToggle" type="button">Separate Off</button>
       <button class="view-toggle" id="viewToggle" type="button">Compact View</button>
       <button class="audio-toggle" id="audioToggle" type="button">Tone Off</button>
     </div>
   </div>
   <div class="compact-view compact-wrap">
     <div class="group-rows recent-group-rows" id="compactRecentRows"></div>
+  </div>
+  <div class="tt-view tt-wrap">
+    <div class="tt-pane tt-pane-top">
+      <div class="tt-pane-title">Approaching</div>
+      <div class="tt-scroll"><div id="ttActiveRows"></div></div>
+    </div>
+    <div class="tt-pane tt-pane-bottom">
+      <div class="tt-pane-title">Finished</div>
+      <div class="tt-scroll"><div id="ttCompletedRows"></div></div>
+    </div>
   </div>
   <div class="default-view group-wrap">
     <div class="group-title">Recent Groups</div>
@@ -2039,7 +2431,11 @@ body.is-desktop-portrait .compact-group-cell {{
 const selectedCategory = {category_js};
 const apiPath = {json.dumps(api_path)};
 let autoScroll = true;
-let compactMode = localStorage.getItem('lapsrv_compact_mode') === '1';
+let compactAutoScroll = true;
+let viewMode = localStorage.getItem('lapsrv_view_mode') || 'full';
+let compactSeparate = localStorage.getItem('lapsrv_compact_separate') === '1';
+let lastIsTimeTrial = false;
+let ttCompletedSort = {{ key: null, dir: 'desc' }};
 let audioCtx = null;
 let lastBellToneKey = '';
 let audioEnabled = false;
@@ -2056,10 +2452,62 @@ function shortCategory(name) {{
     .replaceAll(' (Open)', '')
     .replaceAll(' (Women)', '-W');
 }}
+function updateCompactToggle() {{
+  const button = document.getElementById('compactToggle');
+  if (!button) return;
+  button.textContent = compactSeparate ? 'Separate On' : 'Separate Off';
+  button.classList.toggle('active', compactSeparate);
+  button.style.display = lastIsTimeTrial && viewMode === 'tt' ? 'none' : '';
+}}
 function compactPos(note) {{
   const raw = (note || '').trim();
   if (!raw) return '';
   return raw.includes(':') ? raw.split(':', 1)[0] : raw;
+}}
+function parseClockText(text) {{
+  const value = (text || '').trim();
+  if (!value) return null;
+  const sign = value.startsWith('-') ? -1 : 1;
+  const clean = sign < 0 ? value.slice(1) : value;
+  const parts = clean.split(':');
+  if (parts.length < 2 || parts.length > 3) return null;
+  let hours = 0, minutes = 0, seconds = 0;
+  if (parts.length === 3) {{
+    hours = Number(parts[0]);
+    minutes = Number(parts[1]);
+    seconds = Number(parts[2]);
+  }} else {{
+    minutes = Number(parts[0]);
+    seconds = Number(parts[1]);
+  }}
+  if ([hours, minutes, seconds].some(Number.isNaN)) return null;
+  return sign * (hours * 3600 + minutes * 60 + seconds);
+}}
+function compareTTValues(a, b, key) {{
+  if (key === 'bib') return Number(a[key] || 0) - Number(b[key] || 0);
+  if (['race_time', 'start_time', 'stop_time', 'elapsed'].includes(key)) {{
+    const av = parseClockText(a[key]);
+    const bv = parseClockText(b[key]);
+    return (av ?? -Infinity) - (bv ?? -Infinity);
+  }}
+  return (a[key] || '').localeCompare(b[key] || '', undefined, {{ sensitivity: 'base' }});
+}}
+function sortTTRows(rows) {{
+  const out = (rows || []).slice();
+  if (!ttCompletedSort.key) return out;
+  out.sort((a, b) => {{
+    const cmp = compareTTValues(a, b, ttCompletedSort.key);
+    return ttCompletedSort.dir === 'asc' ? cmp : -cmp;
+  }});
+  return out;
+}}
+function ttHeaderLabel(label, key, sortable) {{
+  if (!sortable) return esc(label);
+  if (ttCompletedSort.key !== key) return esc(label);
+  return esc(label) + ' ' + (ttCompletedSort.dir === 'asc' ? '&#9650;' : '&#9660;');
+}}
+function trimClockFraction(text) {{
+  return ((text || '').split('.', 1)[0] || text || '');
 }}
 function topGroupBellKey(groupTable) {{
   const headers = groupTable.headers || [];
@@ -2126,6 +2574,7 @@ function maybePlayBellTone(groupTable) {{
 }}
 
 function compactGroupTableHtml(groupTable) {{
+  if (compactSeparate) return compactGroupTableHtmlSeparate(groupTable);
   const headers = groupTable.headers || [];
   const rows = groupTable.rows || [];
   const headerStatus = groupTable.header_status || {{}};
@@ -2194,10 +2643,62 @@ function compactGroupTableHtml(groupTable) {{
   }});
   return `<table class="compact-table"><thead><tr><th>Lap</th><th>Category</th><th>Note</th><th>Count</th></tr></thead><tbody>${{lines.join('')}}</tbody></table>`;
 }}
+function compactGroupTableHtmlSeparate(groupTable) {{
+  const headers = groupTable.headers || [];
+  const rows = (groupTable.rows || []).slice().reverse();
+  const headerStatus = groupTable.header_status || {{}};
+  const lines = [];
+  rows.forEach((row, rowIndex) => {{
+    headers.forEach((h) => {{
+      const cell = (row.cells || {{}})[h];
+      if (!cell) return;
+      const status = headerStatus[h] || {{}};
+      const deficitCounts = cell.deficit_counts || {{}};
+      const deficitKeys = Object.keys(deficitCounts).map(v => Number(v)).sort((a, b) => a - b);
+      const pushLine = (lapText, countValue, isLapped) => {{
+        if (!countValue) return;
+        const rowClasses = [];
+        if (!isLapped && status.is_bell) rowClasses.push('compact-group-bell');
+        if (!isLapped && cell.is_lead) rowClasses.push('compact-group-lead');
+        if (isLapped) rowClasses.push('compact-group-lapped');
+        const rowClass = rowClasses.join(' ');
+        lines.push(`<tr class="${{rowClass}}"><td>${{esc(lapText)}}</td><td class="compact-group-cell">${{esc(shortCategory(h))}}</td><td>${{esc(compactPos(cell.note || cell.text || ''))}}</td><td>${{esc(String(countValue))}}</td><td>${{esc(row.elapsed_text || '')}}</td></tr>`);
+      }};
+      if (deficitKeys.length) {{
+        deficitKeys.forEach((deficit) => {{
+          const countValue = Number(deficitCounts[deficit] || 0);
+          const lapText = deficit > 0 ? `(-${{deficit}})` : (status.is_bell ? '1' : (status.text || ''));
+          pushLine(lapText, countValue, deficit > 0);
+        }});
+      }} else {{
+        const lapText = status.is_bell ? '1' : (status.text || '');
+        pushLine(lapText, Number(cell.count || 0), false);
+      }}
+    }});
+    if (rowIndex !== rows.length - 1) {{
+      lines.push('<tr class="compact-separator"><td colspan="5"></td></tr>');
+    }}
+  }});
+  return `<table class="compact-table compact-table-separate"><thead><tr><th>Lap</th><th>Category</th><th>Note</th><th>Count</th><th></th></tr></thead><tbody>${{lines.join('')}}</tbody></table>`;
+}}
+function ttTableHtml(rows, stopLabel, sortable=false) {{
+  const viewRows = sortable ? sortTTRows(rows) : (rows || []);
+  const body = viewRows.map((row) => `<tr><td class="tt-num">${{esc(row.race_time || '')}}</td><td class="tt-num">${{esc(row.bib || '')}}</td><td class="tt-num">${{esc(row.start_time || '')}}</td><td class="tt-num">${{esc(row.stop_time || '')}}</td><td class="tt-num">${{esc(row.elapsed || '')}}</td><td>${{esc(((row.last_name || '') + ',' + (row.first_name || '')).replace(/^,|,$/g, ''))}}</td></tr>`).join('');
+  const th = (label, key, cls='') => '<th class="' + cls + (sortable ? ' tt-sortable' : '') + '"' + (sortable ? ' data-tt-sort="' + key + '"' : '') + '>' + ttHeaderLabel(label, key, sortable) + '</th>';
+  return '<table class="tt-table"><colgroup><col class="tt-col-race"><col class="tt-col-bib"><col class="tt-col-start"><col class="tt-col-stop"><col class="tt-col-elapsed"><col class="tt-col-name"></colgroup><thead><tr>' + th('Race', 'race_time', 'tt-num') + th('BIB', 'bib', 'tt-num') + th('Start', 'start_time', 'tt-num') + th(stopLabel || 'Stop', 'stop_time', 'tt-num') + th('Elapsed', 'elapsed', 'tt-num') + th('Name', 'last_name') + '</tr></thead><tbody>' + body + '</tbody></table>';
+}}
 function applyViewMode() {{
-  document.body.classList.toggle('compact-mode', compactMode);
+  document.body.classList.toggle('compact-mode', viewMode === 'compact');
+  document.body.classList.toggle('tt-mode', viewMode === 'tt');
   const button = document.getElementById('viewToggle');
-  if (button) button.textContent = compactMode ? 'Full View' : 'Compact View';
+  if (!button) return;
+  if (lastIsTimeTrial) {{
+    const nextLabel = viewMode === 'full' ? 'Compact View' : (viewMode === 'compact' ? 'TT View' : 'Full View');
+    button.textContent = nextLabel;
+  }} else {{
+    button.textContent = viewMode === 'compact' ? 'Full View' : 'Compact View';
+  }}
+  updateCompactToggle();
 }}
 function updateAudioButton() {{
   const button = document.getElementById('audioToggle');
@@ -2210,6 +2711,11 @@ function updateWarningButton(enabled, visible) {{
   warningToggle.style.display = visible ? '' : 'none';
   warningToggle.textContent = enabled ? 'Warning On' : 'Warning Off';
   warningToggle.classList.toggle('active', enabled);
+}}
+function updateTTIndicator(isTimeTrial) {{
+  const indicator = document.getElementById('ttIndicator');
+  if (!indicator) return;
+  indicator.style.display = isTimeTrial ? '' : 'none';
 }}
 async function setWarningEnabled(enabled) {{
   await fetch('/api/warning', {{
@@ -2285,6 +2791,8 @@ const tableWrap = document.getElementById('tableWrap');
 const recentGroupRowsWrap = document.getElementById('recentGroupRows');
 const pastGroupRowsWrap = document.getElementById('pastGroupRows');
 const compactRecentRowsWrap = document.getElementById('compactRecentRows');
+const ttCompletedRowsEl = document.getElementById('ttCompletedRows');
+const compactToggle = document.getElementById('compactToggle');
 const warningToggle = document.getElementById('warningToggle');
 const viewToggle = document.getElementById('viewToggle');
 const audioToggle = document.getElementById('audioToggle');
@@ -2292,15 +2800,41 @@ const ipHealthBar = document.getElementById('ipHealthBar');
 applyDeviceClass();
 applyViewMode();
 updateAudioButton();
+updateCompactToggle();
 window.addEventListener('resize', applyDeviceClass);
+if (ttCompletedRowsEl) {{
+  ttCompletedRowsEl.addEventListener('click', (event) => {{
+    const th = event.target.closest('th[data-tt-sort]');
+    if (!th) return;
+    const key = th.dataset.ttSort;
+    if (ttCompletedSort.key === key) ttCompletedSort.dir = ttCompletedSort.dir === 'asc' ? 'desc' : 'asc';
+    else {{
+      ttCompletedSort.key = key;
+      ttCompletedSort.dir = ['last_name', 'first_name'].includes(key) ? 'asc' : 'desc';
+    }}
+    ttCompletedRowsEl.innerHTML = ttTableHtml(window.__ttCompletedRows || [], 'Stop', true);
+  }});
+}}
+if (compactToggle) {{
+  compactToggle.addEventListener('click', () => {{
+    compactSeparate = !compactSeparate;
+    localStorage.setItem('lapsrv_compact_separate', compactSeparate ? '1' : '0');
+    updateCompactToggle();
+    compactRecentRowsWrap.innerHTML = compactGroupTableHtml(window.__recentGroupTable || {{ headers: [], rows: [], header_status: {{}} }});
+  }});
+}}
 warningToggle.addEventListener('click', async () => {{
   const enabled = !(warningToggle.classList.contains('active'));
   await setWarningEnabled(enabled);
   updateWarningButton(enabled, true);
 }});
 viewToggle.addEventListener('click', () => {{
-  compactMode = !compactMode;
-  localStorage.setItem('lapsrv_compact_mode', compactMode ? '1' : '0');
+  if (lastIsTimeTrial) {{
+    viewMode = viewMode === 'full' ? 'compact' : (viewMode === 'compact' ? 'tt' : 'full');
+  }} else {{
+    viewMode = viewMode === 'compact' ? 'full' : 'compact';
+  }}
+  localStorage.setItem('lapsrv_view_mode', viewMode);
   applyViewMode();
 }});
 audioToggle.addEventListener('click', async () => {{
@@ -2322,16 +2856,36 @@ recentGroupRowsWrap.addEventListener('scroll', () => {{
 pastGroupRowsWrap.addEventListener('scroll', () => {{
   // debug pane; no auto-follow state needed
 }});
+compactRecentRowsWrap.addEventListener('scroll', () => {{
+  const remaining = compactRecentRowsWrap.scrollHeight - compactRecentRowsWrap.scrollTop - compactRecentRowsWrap.clientHeight;
+  compactAutoScroll = remaining < 40;
+}});
 async function refresh() {{
   const res = await fetch(apiPath, {{cache: 'no-store'}});
   const data = await res.json();
   document.getElementById('event').textContent = data.event_name || 'lapsrv';
+  const compactRaceTimeEl = document.getElementById('compactRaceTime');
+  if (compactRaceTimeEl) compactRaceTimeEl.textContent = trimClockFraction(data.cur_race_time || data.current_race_time || data.race_clock || '00:00:00');
+  lastIsTimeTrial = !!data.is_time_trial;
+  updateTTIndicator(lastIsTimeTrial);
+  if (!lastIsTimeTrial && viewMode === 'tt') {{
+    viewMode = 'full';
+    localStorage.setItem('lapsrv_view_mode', viewMode);
+  }}
+  applyViewMode();
   ipHealthBar.innerHTML = ipHealthHtml(data.ip_health || []);
   updateWarningButton(!!data.warning_enabled, (data.ip_health || []).length > 0);
   const subsystems = data.subsystems || {{}};
   const recentGroupTable = data.recent_group_table || {{headers: [], header_status: {{}}, rows: []}};
+  window.__recentGroupTable = recentGroupTable;
   recentGroupRowsWrap.innerHTML = groupTableHtml(recentGroupTable);
   compactRecentRowsWrap.innerHTML = compactGroupTableHtml(recentGroupTable);
+  if (compactAutoScroll) {{
+    compactRecentRowsWrap.scrollTop = compactRecentRowsWrap.scrollHeight;
+  }}
+  window.__ttCompletedRows = data.tt_completed_rows || [];
+  document.getElementById('ttActiveRows').innerHTML = ttTableHtml(data.tt_active_rows || [], 'Early');
+  document.getElementById('ttCompletedRows').innerHTML = ttTableHtml(window.__ttCompletedRows, 'Stop', true);
   maybePlayBellTone(recentGroupTable);
   pastGroupRowsWrap.innerHTML = groupTableHtml(data.past_group_table || {{headers: [], header_status: {{}}, rows: []}});
   document.getElementById('rows').innerHTML = (data.passings || []).map(rowHtml).join('');
@@ -2578,6 +3132,7 @@ class LapsrvApp:
         self.args = args
         self.config = RaceConfig.load(Path(args.xlsx))
         self.state = SharedState(self.config, show_unknown_tags=args.show_unknown_tags)
+        self.state.tt_export_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-tt-results.csv')
         self.jchip = JChipServer(self.state, args.listen_host, args.port)
         self.crossmgr = CrossMgrClient(self.state, args.crossmgr_host, args.crossmgr_port)
         self.web = WebServer(self.state, args.web_host, args.web)
@@ -2586,6 +3141,7 @@ class LapsrvApp:
         self.tk = TkMonitor(self.state, on_close=self.request_stop)
         self.stop_event = asyncio.Event()
         self.logger = logging.getLogger("lapsrv.app")
+        print(f"race mode: {'tt' if self.config.time_trial else 'road'}", file=sys.stderr, flush=True)
 
     def request_stop(self) -> None:
         self.logger.info("shutdown requested")
@@ -2648,6 +3204,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-host", default="0.0.0.0", help="JChip listen host, default 0.0.0.0")
     parser.add_argument("--web-host", default="0.0.0.0", help="Web listen host, default 0.0.0.0")
     parser.add_argument("--ip_address", nargs="*", default=[], help="Up to three IP addresses to ping once per second")
+    parser.add_argument("--group-gap-seconds", type=float, default=GROUP_GAP_SECONDS, help=f"Gap in seconds that starts a new group, default {GROUP_GAP_SECONDS}")
+    parser.add_argument("--group-max_age-seconds", type=float, default=GROUP_MAX_AGE_SECONDS, help=f"Maximum age in seconds to retain a group, default {GROUP_MAX_AGE_SECONDS}")
     parser.add_argument("--no-gui", action="store_true", help="Disable the tkinter window")
     parser.add_argument(
         "--show_unknown_tags",
@@ -2664,11 +3222,19 @@ async def async_main(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    global GROUP_GAP_SECONDS, GROUP_MAX_AGE_SECONDS
     parser = build_arg_parser()
     args = parser.parse_args()
     args.crossmgr_host, args.crossmgr_port = parse_host_port(args.crossmgr, DEFAULT_CROSSMGR_PORT)
     if len(args.ip_address) > 3:
         parser.error("--ip_address accepts at most 3 addresses")
+    if args.group_gap_seconds < 0:
+        parser.error("--group-gap-seconds must be >= 0")
+    if args.group_max_age_seconds <= 0:
+        parser.error("--group-max_age-seconds must be > 0")
+
+    GROUP_GAP_SECONDS = float(args.group_gap_seconds)
+    GROUP_MAX_AGE_SECONDS = float(args.group_max_age_seconds)
 
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
