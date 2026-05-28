@@ -13,6 +13,7 @@ import posixpath
 import re
 import shlex
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -180,36 +181,38 @@ def browser_args(browser: str, url: str) -> List[str]:
     base = Path(shlex.split(browser)[0]).name.lower()
 
     if "firefox" in base:
-        return ["--new-window", url, "--kiosk"]
+        return ["--new-window", url]
     if any(name in base for name in ("chrome", "chromium", "brave", "edge")):
-        return [
-            "--new-window",
-            url,
-            "--start-fullscreen",
-        ]
+        return ["--new-window", url]
     return [url]
 
 
-def focus_kwin_screen(screen_index: int) -> None:
+def invoke_kwin_shortcut(shortcut: str) -> bool:
     command = [
         "qdbus6",
         "org.kde.kglobalaccel",
         "/component/kwin",
         "org.kde.kglobalaccel.Component.invokeShortcut",
-        f"Switch to Screen {screen_index}",
+        shortcut,
     ]
     try:
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return True
     except FileNotFoundError:
-        print("qdbus6 not found; launching browser without switching screens", file=sys.stderr)
+        print(f"qdbus6 not found; unable to invoke KWin shortcut {shortcut!r}", file=sys.stderr)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.strip()
-        msg = f"qdbus6 failed while switching to screen {screen_index}"
+        msg = f"qdbus6 failed while invoking KWin shortcut {shortcut!r}"
         print(f"{msg}: {stderr}" if stderr else msg, file=sys.stderr)
+    return False
+
+
+def focus_kwin_screen(screen_index: int) -> None:
+    invoke_kwin_shortcut(f"Switch to Screen {screen_index}")
     time.sleep(0.05)
 
 
-def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]) -> None:
+def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str], fullscreen_delay: float) -> None:
     screens = discover_screens()
     if screen_index < 0 or screen_index >= len(screens):
         available = ", ".join(f"{idx}:{screen.name}={screen.geometry}" for idx, screen in enumerate(screens))
@@ -222,12 +225,44 @@ def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]
     focus_kwin_screen(screen_index)
     print("Browser command:", shlex.join(command))
     subprocess.Popen(command)
+    time.sleep(fullscreen_delay)
+    invoke_kwin_shortcut("Window Fullscreen")
 
 
 def print_screens() -> None:
     for idx, screen in enumerate(discover_screens()):
         primary = " primary" if screen.primary or idx == 0 else ""
         print(f"{idx}: {screen.name} {screen.geometry}{primary}")
+
+
+def local_ip_addresses() -> List[str]:
+    addresses = []
+    output = run_output(["hostname", "-I"])
+    for token in output.split():
+        if ":" in token:
+            continue
+        if token.startswith("127."):
+            continue
+        if token not in addresses:
+            addresses.append(token)
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            address = info[4][0]
+            if not address.startswith("127.") and address not in addresses:
+                addresses.append(address)
+    except OSError:
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        address = probe.getsockname()[0]
+        probe.close()
+        if not address.startswith("127.") and address not in addresses:
+            addresses.append(address)
+    except OSError:
+        pass
+    return addresses
 
 
 def render_html(crossmgr_host: str, crossmgr_ws_port: int) -> bytes:
@@ -283,15 +318,19 @@ def serve(
     crossmgr_ws_port: int,
     screen: Optional[int] = None,
     browser: Optional[str] = None,
+    fullscreen_delay: float = 1.0,
 ) -> None:
     handler = make_handler(crossmgr_host, crossmgr_ws_port)
     with ReuseTCPServer((bind, port), handler) as httpd:
         url_host = "127.0.0.1" if bind in ("", "0.0.0.0") else bind
         url = f"http://{url_host}:{port}/LapCounter.html"
         print(f"Serving LapCounter on {url}")
+        if bind in ("", "0.0.0.0"):
+            for address in local_ip_addresses():
+                print(f"LAN URL: http://{address}:{port}/LapCounter.html")
         print(f"Using CrossMgr websocket ws://{crossmgr_host}:{crossmgr_ws_port}/")
         if screen is not None:
-            launch_browser_on_screen(url, screen, browser)
+            launch_browser_on_screen(url, screen, browser, fullscreen_delay)
         httpd.serve_forever()
 
 
@@ -310,6 +349,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen", type=int, help="launch browser on screen N; screen 0 is the primary display")
     parser.add_argument("--list-screens", action="store_true", help="print detected screen numbers and exit")
     parser.add_argument("--browser", help="browser command for --screen; defaults to BROWSER or a detected browser")
+    parser.add_argument(
+        "--fullscreen-delay",
+        type=float,
+        default=1.0,
+        help="seconds to wait before sending KWin's Window Fullscreen shortcut, default 1.0",
+    )
     return parser.parse_args()
 
 
@@ -324,7 +369,7 @@ def main() -> int:
         return 0
 
     crossmgr_host, crossmgr_ws_port = split_host_port(args.crossmgr)
-    serve(args.bind, args.port, crossmgr_host, crossmgr_ws_port, args.screen, args.browser)
+    serve(args.bind, args.port, crossmgr_host, crossmgr_ws_port, args.screen, args.browser, args.fullscreen_delay)
     return 0
 
 
