@@ -57,7 +57,7 @@ Then launch on the desired screen:
 python3 crossmgrweb.py --crossmgr 192.168.40.41 --screen 1
 ```
 
-Screen `0` is the primary display; remaining screens are ordered by desktop position from top-left to bottom-right. Browser placement uses KDE/KWin's `Switch to Screen N` shortcut through `qdbus6`, launches a browser window, then sends KWin's `Window Fullscreen` shortcut. Chrome is preferred for automatic launch; Firefox is used only as a fallback or when selected with `--browser`.
+When KWin is available, screen numbers follow KWin's `Screen N` numbering; `--list-screens` shows the geometry and KWin index. Browser placement uses KDE/KWin's `Switch to Screen N` shortcut through `qdbus6`, launches Chrome in app/fullscreen mode with a dedicated temporary profile, then sends KWin's `Window Fullscreen` shortcut. Firefox is used only as a fallback or when selected with `--browser`.
 
 ## Motivation
 

@@ -17,6 +17,7 @@ import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import time
 from typing import List, Optional, Tuple
 
@@ -37,6 +38,7 @@ class Screen:
     width: int
     height: int
     primary: bool = False
+    kwin_index: Optional[int] = None
 
     @property
     def geometry(self) -> str:
@@ -154,11 +156,48 @@ def parse_kscreen_screens(output: str) -> List[Screen]:
     return ordered_screens(screens)
 
 
+def parse_kwin_screens(output: str) -> List[Screen]:
+    screens: List[Screen] = []
+    index: Optional[int] = None
+    name: Optional[str] = None
+    for line in output.splitlines():
+        screen_match = re.match(r"Screen\s+(\d+):", line.strip())
+        if screen_match:
+            index = int(screen_match.group(1))
+            name = None
+            continue
+        if index is None:
+            continue
+        line = line.strip()
+        name_match = re.match(r"Name:\s+(.+)$", line)
+        if name_match:
+            name = name_match.group(1).strip()
+            continue
+        geometry_match = re.match(r"Geometry:\s+(-?\d+),(-?\d+),(\d+)x(\d+)$", line)
+        if geometry_match and name:
+            screens.append(
+                Screen(
+                    name=name,
+                    x=int(geometry_match.group(1)),
+                    y=int(geometry_match.group(2)),
+                    width=int(geometry_match.group(3)),
+                    height=int(geometry_match.group(4)),
+                    kwin_index=index,
+                )
+            )
+            index = None
+            name = None
+    return screens
+
+
 def discover_screens() -> List[Screen]:
-    screens = parse_xrandr_screens(run_output(["xrandr", "--query"]))
+    screens = parse_kwin_screens(run_output(["qdbus6", "org.kde.KWin", "/KWin", "org.kde.KWin.supportInformation"]))
     if screens:
         return screens
     screens = parse_kscreen_screens(run_output(["kscreen-doctor", "-o"]))
+    if screens:
+        return screens
+    screens = parse_xrandr_screens(run_output(["xrandr", "--query"]))
     if screens:
         return screens
     raise RuntimeError("could not determine screen geometry with xrandr or kscreen-doctor")
@@ -177,13 +216,21 @@ def find_browser(browser: Optional[str]) -> str:
     raise RuntimeError("no browser found; set BROWSER or use --browser")
 
 
-def browser_args(browser: str, url: str) -> List[str]:
+def browser_args(browser: str, url: str, profile_dir: Optional[Path]) -> List[str]:
     base = Path(shlex.split(browser)[0]).name.lower()
 
     if "firefox" in base:
         return ["--new-window", url]
     if any(name in base for name in ("chrome", "chromium", "brave", "edge")):
-        return ["--new-window", url, "--start-fullscreen"]
+        args = [
+            f"--app={url}",
+            "--start-fullscreen",
+            "--no-first-run",
+            "--disable-session-crashed-bubble",
+        ]
+        if profile_dir is not None:
+            args.append(f"--user-data-dir={profile_dir}")
+        return args
     return [url]
 
 
@@ -220,19 +267,25 @@ def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]
 
     screen = screens[screen_index]
     browser_command = find_browser(browser)
-    command = [*shlex.split(browser_command), *browser_args(browser_command, url)]
+    kwin_screen_index = screen.kwin_index if screen.kwin_index is not None else screen_index
+    profile_dir = Path(tempfile.mkdtemp(prefix="crossmgrweb-chrome-"))
+    command = [*shlex.split(browser_command), *browser_args(browser_command, url, profile_dir)]
     print(f"Launching browser on screen {screen_index} ({screen.name} {screen.geometry})")
-    focus_kwin_screen(screen_index)
+    focus_kwin_screen(kwin_screen_index)
     print("Browser command:", shlex.join(command))
     subprocess.Popen(command)
     time.sleep(fullscreen_delay)
+    if screen.kwin_index is not None:
+        invoke_kwin_shortcut(f"Window to Screen {screen.kwin_index}")
+        time.sleep(0.1)
     invoke_kwin_shortcut("Window Fullscreen")
 
 
 def print_screens() -> None:
     for idx, screen in enumerate(discover_screens()):
-        primary = " primary" if screen.primary or idx == 0 else ""
-        print(f"{idx}: {screen.name} {screen.geometry}{primary}")
+        primary = " primary" if screen.primary else ""
+        kwin = f" kwin={screen.kwin_index}" if screen.kwin_index is not None else ""
+        print(f"{idx}: {screen.name} {screen.geometry}{primary}{kwin}")
 
 
 def local_ip_addresses() -> List[str]:
@@ -346,7 +399,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"HTTP server port, default {DEFAULT_PORT}")
     parser.add_argument("--bind", default="0.0.0.0", help="HTTP bind address, default 0.0.0.0")
-    parser.add_argument("--screen", type=int, help="launch browser on screen N; screen 0 is the primary display")
+    parser.add_argument("--screen", type=int, help="launch browser on screen N from --list-screens")
     parser.add_argument("--list-screens", action="store_true", help="print detected screen numbers and exit")
     parser.add_argument("--browser", help="browser command for --screen; defaults to BROWSER or a detected browser")
     parser.add_argument(
