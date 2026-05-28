@@ -224,7 +224,6 @@ def browser_args(browser: str, url: str, profile_dir: Optional[Path]) -> List[st
     if any(name in base for name in ("chrome", "chromium", "brave", "edge")):
         args = [
             f"--app={url}",
-            "--start-fullscreen",
             "--no-first-run",
             "--disable-session-crashed-bubble",
         ]
@@ -278,6 +277,8 @@ def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]
     if screen.kwin_index is not None:
         invoke_kwin_shortcut(f"Window to Screen {screen.kwin_index}")
         time.sleep(0.1)
+    invoke_kwin_shortcut("Window Maximize")
+    time.sleep(0.1)
     invoke_kwin_shortcut("Window Fullscreen")
 
 
