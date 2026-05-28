@@ -208,7 +208,6 @@ function LapCounter( aCanvas ) {
                 this.nTimer = 0;
             }
         }
-        this.draw();
     }
 
     this.onRefresh = function( msg ) {
@@ -256,6 +255,7 @@ function LapCounter( aCanvas ) {
             this.backgrounds = temp;
         }
 
+        this.draw();
     }
     
     this.draw = function() {
@@ -588,34 +588,71 @@ function LapCounter( aCanvas ) {
 }
 
 var websocket = null;
-var timeoutID = null
-function RetryResetWebSocket() {
-    if( timeoutID === null )
-        timeoutID = setTimeout( ResetWebSocket, 5000 );
+var timeoutID = null;
+var watchdogID = null;
+var websocketSerial = 0;
+var lastWebSocketMessageTime = 0;
+var websocketRetryMs = 5000;
+var websocketStaleMs = 30000;
+
+function RetryResetWebSocket(reason) {
+    if( timeoutID === null ) {
+        console.log('WebSocket: Scheduling reconnect in ' + (websocketRetryMs / 1000) + ' seconds' + (reason ? ' (' + reason + ')' : '') + '...');
+        timeoutID = setTimeout( ResetWebSocket, websocketRetryMs );
+    }
 }
-function ResetWebSocket() {
+
+function ClearRetryResetWebSocket() {
     if( timeoutID !== null ) {
         clearTimeout( timeoutID );
         timeoutID = null;
     }
+}
+
+function StartWebSocketWatchdog() {
+    if( watchdogID !== null )
+        return;
+    watchdogID = setInterval(function() {
+        if( !websocket || websocket.readyState !== websocket.OPEN )
+            return;
+        if( lastWebSocketMessageTime && (new Date).getTime() - lastWebSocketMessageTime > websocketStaleMs ) {
+            console.log('WebSocket: No refresh messages received recently. Reconnecting...');
+            var staleWebSocket = websocket;
+            websocket = null;
+            try {
+                staleWebSocket.close();
+            }
+            catch(e) {
+                console.log('WebSocket: Error while closing stale socket:', e);
+            }
+            RetryResetWebSocket('stale');
+        }
+    }, 5000);
+}
+function ResetWebSocket() {
+    ClearRetryResetWebSocket();
 
     if ("WebSocket" in window) {
         if( websocket && websocket.readyState != websocket.CLOSED ) {
+            websocket.onopen = null;
+            websocket.onmessage = null;
+            websocket.onerror = null;
+            websocket.onclose = null;
             websocket.close();
-            websocket = null;
         }
+        websocket = null;
         console.log('Connecting to WebSocket...');
         console.log('window.location.hostname: %s', window.location.hostname);
         console.log('window.location.port: %s', window.location.port);
         console.log('localhost: %s', 'localhost');
 
         var proto = (window.location.protocol === "https:") ? "wss://" : "ws://";
-        var host = window.location.hostname;
+        var host = window.LAPCOUNTER_CROSSMGR_HOST || window.location.hostname;
         var port = window.location.port;
 
         // Default to 8765 if no port (e.g., when accessed as https://hostname/)
         var httpPort = port ? parseInt(port) : 8765;
-        var wsPort = httpPort + 2;
+        var wsPort = window.LAPCOUNTER_CROSSMGR_WS_PORT || (httpPort + 2);
         var wsurl = proto + host + ":" + wsPort + "/";
 
         // Log for debugging
@@ -624,9 +661,30 @@ function ResetWebSocket() {
         console.dir(window.location);
 
         // Connect
-        websocket = new window.WebSocket(wsurl);
+        var connectionSerial = ++websocketSerial;
+        try {
+            websocket = new window.WebSocket(wsurl);
+        }
+        catch(e) {
+            console.log('WebSocket: Failed to create socket.', e);
+            RetryResetWebSocket('create failed');
+            return;
+        }
+
+        websocket.onopen = function() {
+            if( connectionSerial !== websocketSerial )
+                return;
+            lastWebSocketMessageTime = (new Date).getTime();
+            ClearRetryResetWebSocket();
+            StartWebSocketWatchdog();
+            console.log('WebSocket: Connected.');
+        };
 
         websocket.onmessage = function( evt ) {
+            if( connectionSerial !== websocketSerial )
+                return;
+            lastWebSocketMessageTime = (new Date).getTime();
+            ClearRetryResetWebSocket();
             var msg = JSON.parse( evt.data );
             console.log('WebSocket: Message received:', msg);
             console.dir(msg);
@@ -636,17 +694,32 @@ function ResetWebSocket() {
         };
         
         websocket.onerror = function(e) {
-            console.log('WebSocket: Error.  Scheduling reconnect in 5 seconds...');
-            RetryResetWebSocket();
+            if( connectionSerial !== websocketSerial )
+                return;
+            console.log('WebSocket: Error.', e);
+            if( websocket && websocket.readyState !== websocket.CLOSED ) {
+                try {
+                    websocket.close();
+                }
+                catch(err) {
+                    console.log('WebSocket: Error while closing failed socket:', err);
+                }
+            }
+            RetryResetWebSocket('error');
         };
         
         websocket.onclose = function(e) {
-            console.log('WebSocket: Closed.  Scheduling reconnect in 5 seconds...');
-            RetryResetWebSocket();
+            if( connectionSerial !== websocketSerial )
+                return;
+            console.log('WebSocket: Closed.', e);
+            websocket = null;
+            RetryResetWebSocket('closed');
         };
     }
 }
 function CloseWebSocket() {
+    ++websocketSerial;
+    ClearRetryResetWebSocket();
     if( websocket )
         websocket.close();
     websocket = null;
