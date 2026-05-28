@@ -170,7 +170,7 @@ def find_browser(browser: Optional[str]) -> str:
     browser_env = os.environ.get("BROWSER")
     if browser_env:
         return browser_env
-    for candidate in ("firefox", "google-chrome", "chromium-browser", "chromium", "brave-browser", "microsoft-edge"):
+    for candidate in ("google-chrome", "chromium-browser", "chromium", "brave-browser", "microsoft-edge", "firefox"):
         path = shutil.which(candidate)
         if path:
             return path
@@ -183,7 +183,7 @@ def browser_args(browser: str, url: str) -> List[str]:
     if "firefox" in base:
         return ["--new-window", url]
     if any(name in base for name in ("chrome", "chromium", "brave", "edge")):
-        return ["--new-window", url]
+        return ["--new-window", url, "--start-fullscreen"]
     return [url]
 
 

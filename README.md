@@ -21,6 +21,44 @@ See the install bat file:
 
 - install.bat
 
+### Standalone deployment helper
+
+`crossmgrweb.py` supports two deployment modes.
+
+Install mode writes the current `LapCounter.html` into a CrossMgr HTML directory:
+
+```sh
+python3 crossmgrweb.py --install /path/to/CrossMgrHtml
+```
+
+Server mode serves `LapCounter.html` directly on port `8675` and points the page at CrossMgr's websocket. If CrossMgr is on the same machine:
+
+```sh
+python3 crossmgrweb.py
+```
+
+If CrossMgr is on another machine:
+
+```sh
+python3 crossmgrweb.py --crossmgr 192.168.40.41
+```
+
+Open `http://<server-ip>:8675/LapCounter.html` in the browser. Category-layout URLs such as `http://<server-ip>:8675/LapCounterA-B.html` also work.
+
+To launch the browser from the helper, first check the detected screen numbers:
+
+```sh
+python3 crossmgrweb.py --list-screens
+```
+
+Then launch on the desired screen:
+
+```sh
+python3 crossmgrweb.py --crossmgr 192.168.40.41 --screen 1
+```
+
+Screen `0` is the primary display; remaining screens are ordered by desktop position from top-left to bottom-right. Browser placement uses KDE/KWin's `Switch to Screen N` shortcut through `qdbus6`, launches a browser window, then sends KWin's `Window Fullscreen` shortcut. Chrome is preferred for automatic launch; Firefox is used only as a fallback or when selected with `--browser`.
+
 ## Motivation
 
 The original *LapCounter.html* file was not scaling well on modern high resolution displays.
