@@ -16,6 +16,7 @@ import shutil
 import socketserver
 import subprocess
 import sys
+import time
 from typing import List, Optional, Tuple
 
 
@@ -162,16 +163,6 @@ def discover_screens() -> List[Screen]:
     raise RuntimeError("could not determine screen geometry with xrandr or kscreen-doctor")
 
 
-def find_wmposxy() -> str:
-    wmposxy = shutil.which("wmposxy")
-    if wmposxy:
-        return wmposxy
-    local_wmposxy = Path(__file__).with_name("wmposxy") / "wmposxy"
-    if local_wmposxy.exists():
-        return str(local_wmposxy)
-    raise RuntimeError("wmposxy not found in PATH or ./wmposxy/wmposxy")
-
-
 def find_browser(browser: Optional[str]) -> str:
     if browser:
         return browser
@@ -185,24 +176,37 @@ def find_browser(browser: Optional[str]) -> str:
     raise RuntimeError("no browser found; set BROWSER or use --browser")
 
 
-def browser_args(browser: str, screen: Screen, url: str) -> List[str]:
+def browser_args(browser: str, url: str) -> List[str]:
     base = Path(shlex.split(browser)[0]).name.lower()
-    width = str(screen.width)
-    height = str(screen.height)
-    geometry = screen.geometry
 
     if "firefox" in base:
-        return ["--geometry", geometry, "--new-window", url, "--kiosk"]
+        return ["--new-window", url, "--kiosk"]
     if any(name in base for name in ("chrome", "chromium", "brave", "edge")):
         return [
-            f"--geometry={geometry}",
-            f"--window-size={width},{height}",
-            f"--window-position={screen.x},{screen.y}",
-            "--start-fullscreen",
             "--new-window",
             url,
+            "--start-fullscreen",
         ]
-    return ["--geometry", geometry, url]
+    return [url]
+
+
+def focus_kwin_screen(screen_index: int) -> None:
+    command = [
+        "qdbus6",
+        "org.kde.kglobalaccel",
+        "/component/kwin",
+        "org.kde.kglobalaccel.Component.invokeShortcut",
+        f"Switch to Screen {screen_index}",
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        print("qdbus6 not found; launching browser without switching screens", file=sys.stderr)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip()
+        msg = f"qdbus6 failed while switching to screen {screen_index}"
+        print(f"{msg}: {stderr}" if stderr else msg, file=sys.stderr)
+    time.sleep(0.05)
 
 
 def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]) -> None:
@@ -212,10 +216,10 @@ def launch_browser_on_screen(url: str, screen_index: int, browser: Optional[str]
         raise RuntimeError(f"screen {screen_index} is not available; screens: {available}")
 
     screen = screens[screen_index]
-    wmposxy = find_wmposxy()
     browser_command = find_browser(browser)
-    command = [wmposxy, *shlex.split(browser_command), *browser_args(browser_command, screen, url)]
+    command = [*shlex.split(browser_command), *browser_args(browser_command, url)]
     print(f"Launching browser on screen {screen_index} ({screen.name} {screen.geometry})")
+    focus_kwin_screen(screen_index)
     print("Browser command:", shlex.join(command))
     subprocess.Popen(command)
 
