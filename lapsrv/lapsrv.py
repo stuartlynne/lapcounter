@@ -30,7 +30,10 @@ from tkinter import ttk
 from typing import Any, Optional
 
 from aiohttp import web
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 import websockets
 
 
@@ -102,6 +105,35 @@ def format_elapsed_hms(seconds: Optional[float]) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def parse_clock_to_days(value: str) -> Optional[float]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    sign = -1 if raw.startswith("-") else 1
+    clean = raw[1:] if sign < 0 else raw
+    parts = clean.split(":")
+    if len(parts) == 3:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
+    elif len(parts) == 2:
+        hours = 0
+        minutes = int(parts[0])
+        seconds = float(parts[1])
+    else:
+        raise ValueError(f"unsupported time format: {value!r}")
+    total_seconds = sign * (hours * 3600 + minutes * 60 + seconds)
+    return total_seconds / 86400.0
+
+
+def set_time_cell(ws: Any, ref: str, value: str, decimals: int = 3) -> None:
+    parsed = parse_clock_to_days(value) if (value or "").strip() else None
+    cell = ws[ref]
+    cell.value = parsed
+    if parsed is not None:
+        cell.number_format = "[h]:mm:ss" + (("." + ("0" * decimals)) if decimals else "")
 
 
 def parse_speed_mps(value: Any) -> Optional[float]:
@@ -391,6 +423,11 @@ class SharedState:
         self.tt_export_path: Optional[Path] = None
         self.tt_exported_keys: set[str] = set()
         self.tt_diag_logged: set[str] = set()
+        self.road_export_path: Optional[Path] = None
+        self.road_xlsx_path: Optional[Path] = None
+        self.road_pending_passings: list[PassingRecord] = []
+        self.road_exported_keys: set[str] = set()
+        self.road_exported_recorded_keys: set[str] = set()
 
     def effective_category_config(self, category: str) -> CategoryConfig:
         base = self.config.categories.get(category, CategoryConfig(name=category))
@@ -423,6 +460,9 @@ class SharedState:
 
     def tt_export_csv_path(self) -> Optional[Path]:
         return self.tt_export_path
+
+    def road_export_csv_path(self) -> Optional[Path]:
+        return self.road_export_path
 
     def set_subsystem_status(self, key: str, state: str, endpoint: Optional[str] = None, detail: str = "") -> None:
         with self.lock:
@@ -470,11 +510,15 @@ class SharedState:
         self.last_lapcounter_update = None
         self.tt_exported_keys.clear()
         self.tt_diag_logged.clear()
+        self.road_pending_passings.clear()
+        self.road_exported_keys.clear()
+        self.road_exported_recorded_keys.clear()
 
     def reset_for_reader_reconnect(self, reader: str = "") -> None:
         with self.lock:
             self.passings.clear()
             self.rider_runtime.clear()
+            self.road_pending_passings.clear()
         logging.getLogger("lapsrv.state").warning(
             "reader reconnect reset local RFID state%s",
             f": {reader}" if reader else "",
@@ -730,6 +774,24 @@ class SharedState:
             if recorded_lap is None or recorded_time is None or recorded_lap < 1:
                 continue
             recorded[str(bib)] = {"lap": int(recorded_lap), "t": float(recorded_time)}
+        return recorded
+
+    def _road_recorded_events_by_bib(self) -> dict[str, list[dict[str, Any]]]:
+        recorded: dict[str, list[dict[str, Any]]] = {}
+        for bib, result in self.results_by_bib.items():
+            if not result:
+                continue
+            race_times = self._race_times(result)
+            interp = self._interp_flags(result)
+            if len(race_times) < 2:
+                continue
+            events: list[dict[str, Any]] = []
+            for lap in range(1, len(race_times)):
+                if lap < len(interp) and interp[lap]:
+                    continue
+                events.append({"lap": lap, "t": float(race_times[lap])})
+            if events:
+                recorded[str(bib)] = sorted(events, key=lambda item: float(item["t"]))
         return recorded
 
     def _result_progress(self, result: dict[str, Any], current_race_time: Optional[float]) -> dict[str, Optional[float]]:
@@ -1039,6 +1101,15 @@ class SharedState:
                     reader=reader,
                 )
             self.passings.append(record)
+            if not self.is_time_trial() and rider and record.race_time is not None:
+                duplicate_pending = any(
+                    p.bib == record.bib
+                    and p.race_time is not None
+                    and abs(float(p.race_time) - float(record.race_time)) < LOCAL_READ_DEDUP_SECONDS
+                    for p in reversed(self.road_pending_passings[-20:])
+                )
+                if not duplicate_pending:
+                    self.road_pending_passings.append(record)
             return record
 
     def _category_laps_to_go(self, category: str, current_race_time: Optional[float]) -> Optional[int]:
@@ -1321,6 +1392,166 @@ class SharedState:
                 row.pop("sort_time", None)
         return active_rows, completed_rows
 
+    def _road_export_row_from_match(self, passing: PassingRecord, recorded: dict[str, Any]) -> dict[str, Any]:
+        rider = self.config.riders_by_bib.get(str(passing.bib))
+        result = self.results_by_bib.get(str(passing.bib), {})
+        category = self._effective_category_name(rider, result) if rider else passing.category
+        early_time = passing.race_time
+        crossmgr_time = float(recorded["t"]) if recorded.get("t") is not None else None
+        time_delta = None if early_time is None or crossmgr_time is None else max(0.0, crossmgr_time - early_time)
+        early_pos = passing.category_rank
+        crossmgr_pos = self._rank_for_rider(rider) if rider else None
+        pos_change = None
+        if early_pos is not None and crossmgr_pos is not None:
+            pos_change = int(early_pos) - int(crossmgr_pos)
+        return {
+            "early_time": format_clock_ms(early_time),
+            "crossmgr_time": format_clock_ms(crossmgr_time),
+            "time_delta": format_clock_ms(time_delta),
+            "bib": str(passing.bib),
+            "last_name": rider.last_name if rider else "",
+            "first_name": rider.first_name if rider else "",
+            "category": category,
+            "team": rider.team if rider else passing.team,
+            "lap": str(recorded.get("lap") or passing.lap or ""),
+            "early_pos": str(early_pos or ""),
+            "crossmgr_pos": str(crossmgr_pos or ""),
+            "pos_change": "" if pos_change is None else str(pos_change),
+        }
+
+    def _append_road_passing_csv(self, row: dict[str, Any]) -> None:
+        if not self.road_export_path:
+            return
+        self.road_export_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not self.road_export_path.exists() or self.road_export_path.stat().st_size == 0
+        fields = [
+            "early_time",
+            "crossmgr_time",
+            "time_delta",
+            "bib",
+            "last_name",
+            "first_name",
+            "category",
+            "team",
+            "lap",
+            "early_pos",
+            "crossmgr_pos",
+            "pos_change",
+        ]
+        with self.road_export_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+    def update_road_exports(self) -> None:
+        with self.lock:
+            if self.is_time_trial() or not self.road_export_path:
+                return
+            recorded_by_bib = self._road_recorded_events_by_bib()
+            used_recorded_keys: set[str] = set()
+            for passing in sorted(self.road_pending_passings, key=lambda p: p.race_time if p.race_time is not None else -1.0):
+                if passing.race_time is None or not passing.bib or passing.bib in {"?", ""}:
+                    continue
+                early_key = f"{passing.bib}:{format_clock_ms(passing.race_time)}"
+                if early_key in self.road_exported_keys:
+                    continue
+                recorded_events = recorded_by_bib.get(str(passing.bib), [])
+                match: Optional[dict[str, Any]] = None
+                for recorded in recorded_events:
+                    rec_t = recorded.get("t")
+                    if rec_t is None or float(rec_t) + 0.001 < float(passing.race_time):
+                        continue
+                    recorded_key = f"{passing.bib}:{recorded.get('lap')}:{format_clock_ms(float(rec_t))}"
+                    if recorded_key in used_recorded_keys or recorded_key in self.road_exported_recorded_keys:
+                        continue
+                    match = recorded
+                    used_recorded_keys.add(recorded_key)
+                    break
+                if not match:
+                    continue
+                self._append_road_passing_csv(self._road_export_row_from_match(passing, match))
+                self.road_exported_keys.add(early_key)
+                self.road_exported_recorded_keys.add(f"{passing.bib}:{match.get('lap')}:{format_clock_ms(float(match.get('t')))}")
+
+    def export_road_xlsx(self) -> Optional[Path]:
+        with self.lock:
+            self.update_road_exports()
+            if self.is_time_trial() or not self.road_export_path or not self.road_export_path.exists():
+                return None
+            xlsx_path = self.road_xlsx_path or self.road_export_path.with_suffix(".xlsx")
+            with self.road_export_path.open(newline="") as f:
+                rows = list(csv.DictReader(f))
+            if not rows:
+                return None
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Road Passings"
+            wb.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
+            headers = [
+                "Early",
+                "CrossMgr",
+                "Delta",
+                "BIB",
+                "Last",
+                "First",
+                "Category",
+                "Team",
+                "Lap",
+                "Early Pos",
+                "CrossMgr Pos",
+                "Pos +/-",
+                "Note",
+            ]
+            ws.append(headers)
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+
+            for row_num, src in enumerate(rows, start=2):
+                set_time_cell(ws, f"A{row_num}", src.get("early_time", ""), decimals=3)
+                set_time_cell(ws, f"B{row_num}", src.get("crossmgr_time", ""), decimals=3)
+                set_time_cell(ws, f"C{row_num}", src.get("time_delta", ""), decimals=3)
+                bib = str(src.get("bib", "")).strip()
+                ws[f"D{row_num}"] = int(bib) if bib.isdigit() else bib
+                ws[f"E{row_num}"] = src.get("last_name", "")
+                ws[f"F{row_num}"] = src.get("first_name", "")
+                ws[f"G{row_num}"] = src.get("category", "")
+                ws[f"H{row_num}"] = src.get("team", "")
+                lap = str(src.get("lap", "")).strip()
+                ws[f"I{row_num}"] = int(lap) if lap.isdigit() else lap
+                for col, field in (("J", "early_pos"), ("K", "crossmgr_pos"), ("L", "pos_change")):
+                    value = str(src.get(field, "")).strip()
+                    ws[f"{col}{row_num}"] = int(value) if value.lstrip("-").isdigit() else value
+                ws[f"M{row_num}"] = ""
+
+            widths = {
+                "A": 13,
+                "B": 13,
+                "C": 13,
+                "D": 5,
+                "E": 18,
+                "F": 18,
+                "G": max(12, min(32, max(len(str(r.get("category", ""))) for r in rows) + 2)),
+                "H": 24,
+                "I": 5,
+                "J": 9,
+                "K": 11,
+                "L": 8,
+                "M": 22,
+            }
+            for col, width in widths.items():
+                ws.column_dimensions[col].width = width
+            for row_num in range(2, ws.max_row + 1):
+                for col in ("A", "B", "C", "D", "I", "J", "K", "L"):
+                    ws[f"{col}{row_num}"].alignment = Alignment(horizontal="center")
+
+            xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(xlsx_path)
+            return xlsx_path
+
     def recent_group_table(self) -> dict[str, Any]:
         recent, _past = self._build_group_tables()
         return recent
@@ -1360,17 +1591,23 @@ class SharedState:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             current_race_time = self.current_race_time()
-            tt_active_rows, tt_completed_rows = self.tt_tables() if self.is_time_trial() else ([], [])
+            is_time_trial = self.is_time_trial()
+            if is_time_trial:
+                tt_active_rows, tt_completed_rows = self.tt_tables()
+            else:
+                self.update_road_exports()
+                tt_active_rows, tt_completed_rows = [], []
             return {
                 "event_name": self.config.event_name,
                 "event_date": self.config.event_date,
                 "timezone": self.config.timezone,
                 "current_race_time": format_clock(current_race_time),
                 "cur_race_time": format_clock(current_race_time),
-                "is_time_trial": self.is_time_trial(),
+                "is_time_trial": is_time_trial,
                 "tt_active_rows": tt_active_rows,
                 "tt_completed_rows": tt_completed_rows,
                 "tt_csv_path": str(self.tt_export_csv_path() or ""),
+                "road_csv_path": str(self.road_export_csv_path() or ""),
                 "recent_group_table": self.recent_group_table(),
                 "past_group_table": self.past_group_table(),
                 "passings": [p.as_dict() for p in self.passings],
@@ -3133,6 +3370,8 @@ class LapsrvApp:
         self.config = RaceConfig.load(Path(args.xlsx))
         self.state = SharedState(self.config, show_unknown_tags=args.show_unknown_tags)
         self.state.tt_export_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-tt-results.csv')
+        self.state.road_export_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-road-passings.csv')
+        self.state.road_xlsx_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-road-passings.xlsx')
         self.jchip = JChipServer(self.state, args.listen_host, args.port)
         self.crossmgr = CrossMgrClient(self.state, args.crossmgr_host, args.crossmgr_port)
         self.web = WebServer(self.state, args.web_host, args.web)
@@ -3192,6 +3431,13 @@ class LapsrvApp:
                 self.logger.warning("shutdown: timed out waiting for background tasks")
             await self._stop_with_timeout("web", self.web.stop())
             await self._stop_with_timeout("jchip", self.jchip.stop())
+            if not self.config.time_trial:
+                try:
+                    exported = self.state.export_road_xlsx()
+                    if exported:
+                        self.logger.info("road passings xlsx exported: %s", exported)
+                except Exception:
+                    self.logger.exception("failed to export road passings xlsx")
             self.logger.info("shutdown: complete")
 
 
