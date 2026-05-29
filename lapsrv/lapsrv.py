@@ -2797,6 +2797,22 @@ body.is-desktop-portrait .compact-group-cell {{
   flex: 1 1 auto;
   min-height: 0;
 }}
+@media (orientation: landscape) {{
+  .tt-wrap {{
+    flex-direction: row;
+    align-items: stretch;
+  }}
+  .tt-pane-top,
+  .tt-pane-bottom {{
+    flex: 1 1 0;
+    min-width: 0;
+  }}
+  .tt-pane-top .tt-scroll {{
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }}
+}}
 </style>
 </head>
 <body>
