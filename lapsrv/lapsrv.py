@@ -49,6 +49,7 @@ GROUP_GAP_SECONDS = 2.0
 MAX_GROUPS = 200
 GROUP_MAX_AGE_SECONDS = 30.0
 LOCAL_READ_DEDUP_SECONDS = 8.0
+EXPORT_READ_DEDUP_SECONDS = LOCAL_READ_DEDUP_SECONDS
 RE_TIME = re.compile(r"^\d\d:\d\d:\d\d\.\d+")
 RE_SPEED = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(km/h|kph|mph)?", re.I)
 STATUS_TIMEOUTS = {
@@ -421,12 +422,15 @@ class SharedState:
         self.ip_health: dict[str, IPHealthStatus] = {}
         self.warning_enabled = True
         self.tt_export_path: Optional[Path] = None
+        self.tt_xlsx_path: Optional[Path] = None
         self.tt_exported_keys: set[str] = set()
+        self.tt_exported_read_times: dict[str, list[float]] = {}
         self.tt_diag_logged: set[str] = set()
         self.road_export_path: Optional[Path] = None
         self.road_xlsx_path: Optional[Path] = None
         self.road_pending_passings: list[PassingRecord] = []
         self.road_exported_keys: set[str] = set()
+        self.road_exported_read_times: dict[str, list[float]] = {}
         self.road_exported_recorded_keys: set[str] = set()
 
     def effective_category_config(self, category: str) -> CategoryConfig:
@@ -456,7 +460,8 @@ class SharedState:
             except (TypeError, ValueError):
                 pass
         rider = self.config.riders_by_bib.get(str(bib))
-        return rider.start_time if rider and rider.start_time is not None else None
+        rider_start = getattr(rider, "start_time", None)
+        return float(rider_start) if rider_start is not None else None
 
     def tt_export_csv_path(self) -> Optional[Path]:
         return self.tt_export_path
@@ -509,9 +514,11 @@ class SharedState:
         self.last_announcer_update = None
         self.last_lapcounter_update = None
         self.tt_exported_keys.clear()
+        self.tt_exported_read_times.clear()
         self.tt_diag_logged.clear()
         self.road_pending_passings.clear()
         self.road_exported_keys.clear()
+        self.road_exported_read_times.clear()
         self.road_exported_recorded_keys.clear()
 
     def reset_for_reader_reconnect(self, reader: str = "") -> None:
@@ -1297,9 +1304,12 @@ class SharedState:
         race_time = passing.race_time
         elapsed_base = official_race_time if official_race_time is not None else race_time
         elapsed = None if elapsed_base is None or start_time is None else max(0.0, elapsed_base - start_time)
+        display_race_time = official_race_time if official_race_time is not None else race_time
         return {
-            "race_time": format_clock(race_time),
-            "race_time_csv": format_clock_ms(race_time),
+            "race_time": format_clock(display_race_time),
+            "race_time_csv": format_clock_ms(display_race_time),
+            "early_time": format_clock(race_time),
+            "early_time_csv": format_clock_ms(race_time),
             "start_time": format_clock(start_time),
             "start_time_csv": format_clock_ms(start_time),
             "stop_time": format_clock(official_race_time),
@@ -1311,7 +1321,7 @@ class SharedState:
             "first_name": rider.first_name if rider else "",
             "category": rider.category if rider else "",
             "team": rider.team if rider else "",
-            "sort_time": race_time if race_time is not None else (official_race_time if official_race_time is not None else -1.0),
+            "sort_time": display_race_time if display_race_time is not None else -1.0,
         }
 
     def _append_tt_completion_csv(self, row: dict[str, Any]) -> None:
@@ -1335,17 +1345,179 @@ class SharedState:
                 row.get("team", ""),
             ])
 
+    @staticmethod
+    def _clock_to_seconds(value: Any) -> Optional[float]:
+        try:
+            parsed = parse_clock_to_days(str(value or ""))
+        except (TypeError, ValueError):
+            return None
+        return None if parsed is None else parsed * 86400.0
+
+    @staticmethod
+    def _export_read_key(passing: PassingRecord) -> str:
+        return (passing.tag or str(passing.bib) or "").strip().upper()
+
+    @staticmethod
+    def _export_read_time(passing: PassingRecord) -> Optional[float]:
+        if passing.race_time is not None:
+            return float(passing.race_time)
+        return passing.seen_at.timestamp() if passing.seen_at else None
+
+    def _claim_export_read(
+        self,
+        seen_by_key: dict[str, list[float]],
+        key: str,
+        read_time: Optional[float],
+        window: float = EXPORT_READ_DEDUP_SECONDS,
+    ) -> bool:
+        key = key.strip().upper()
+        if not key or read_time is None:
+            return True
+        read_time = float(read_time)
+        previous_times = seen_by_key.setdefault(key, [])
+        if any(abs(read_time - previous) < window for previous in previous_times):
+            return False
+        previous_times.append(read_time)
+        if len(previous_times) > 20:
+            del previous_times[:-20]
+        return True
+
+    def _dedupe_export_rows(
+        self,
+        rows: list[dict[str, Any]],
+        key_field: str,
+        time_field: str,
+        window: float = EXPORT_READ_DEDUP_SECONDS,
+    ) -> list[dict[str, Any]]:
+        seen_by_key: dict[str, list[float]] = {}
+        deduped: list[dict[str, Any]] = []
+        for row in rows:
+            key = str(row.get(key_field, "")).strip().upper()
+            row_time = self._clock_to_seconds(row.get(time_field, ""))
+            if self._claim_export_read(seen_by_key, key, row_time, window):
+                deduped.append(row)
+        return deduped
+
+    def _tt_rider_meta_by_bib(self) -> dict[str, dict[str, str]]:
+        category_by_bib: dict[str, str] = {}
+        for category in self.config.categories.values():
+            display = f"{category.name} (Women)" if category.gender.strip().lower() == "women" else category.name
+            for bib in category.numbers.split(","):
+                bib_s = bib.strip()
+                if bib_s:
+                    category_by_bib[bib_s] = display
+        return {
+            bib: {
+                "category": category_by_bib.get(bib, rider.category or ""),
+                "team": rider.team or "",
+            }
+            for bib, rider in self.config.riders_by_bib.items()
+        }
+
+    def export_tt_xlsx(self) -> Optional[Path]:
+        with self.lock:
+            self.tt_tables()
+            if not self.is_time_trial() or not self.tt_export_path or not self.tt_export_path.exists():
+                return None
+            xlsx_path = self.tt_xlsx_path or self.tt_export_path.with_suffix(".xlsx")
+            with self.tt_export_path.open(newline="") as f:
+                rows = self._dedupe_export_rows(list(csv.DictReader(f)), "bib", "race_time")
+            if not rows:
+                return None
+
+            rider_meta = self._tt_rider_meta_by_bib()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Results"
+            wb.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
+            headers = [
+                "Pos",
+                "Race",
+                "BIB",
+                "Start",
+                "Stop",
+                "Penalty",
+                "Elapsed",
+                "Last",
+                "First",
+                "Category",
+                "Team",
+                "Note",
+            ]
+            ws.append(headers)
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+
+            for row_num, src in enumerate(rows, start=2):
+                bib_text = str(src.get("bib", "")).strip()
+                meta = rider_meta.get(bib_text, {})
+                category = src.get("category", "") or meta.get("category", "")
+                team = src.get("team", "") or meta.get("team", "")
+                ws[f"A{row_num}"] = (
+                    f'=IF(OR(J{row_num}="",G{row_num}=""),"",'
+                    f'1+COUNTIFS($J$2:$J$1048576,J{row_num},$G$2:$G$1048576,"<"&G{row_num})'
+                    f'+COUNTIFS($J$2:$J$1048576,J{row_num},$G$2:$G$1048576,G{row_num},$C$2:$C$1048576,"<"&C{row_num}))'
+                )
+                set_time_cell(ws, f"B{row_num}", src.get("race_time", ""), decimals=2)
+                ws[f"C{row_num}"] = int(bib_text) if bib_text.isdigit() else bib_text
+                set_time_cell(ws, f"D{row_num}", src.get("start_time", ""), decimals=2)
+                set_time_cell(ws, f"E{row_num}", src.get("stop_time", ""), decimals=2)
+                ws[f"F{row_num}"] = ""
+                ws[f"G{row_num}"] = f'=IF(OR(E{row_num}="",D{row_num}=""),"",E{row_num}-D{row_num}+IF(F{row_num}="",0,F{row_num}/86400))'
+                ws[f"G{row_num}"].number_format = "[h]:mm:ss.00"
+                ws[f"H{row_num}"] = src.get("last_name", "")
+                ws[f"I{row_num}"] = src.get("first_name", "")
+                ws[f"J{row_num}"] = category
+                ws[f"K{row_num}"] = team
+                ws[f"L{row_num}"] = ""
+
+            category_values = [str(ws[f"J{row_num}"].value or "") for row_num in range(2, ws.max_row + 1)]
+            category_width = max([len("Category"), *(len(v) for v in category_values)], default=len("Category")) + 2
+            widths = {
+                "A": 5,
+                "B": 12,
+                "C": 5,
+                "D": 12,
+                "E": 12,
+                "F": 6,
+                "G": 12,
+                "H": 18,
+                "I": 18,
+                "J": category_width,
+                "K": 22,
+                "L": 18,
+            }
+            for col, width in widths.items():
+                ws.column_dimensions[col].width = width
+            for row_num in range(2, ws.max_row + 1):
+                for col in ("B", "D", "E", "F", "G"):
+                    ws[f"{col}{row_num}"].alignment = Alignment(horizontal="center")
+                ws[f"C{row_num}"].alignment = Alignment(horizontal="right")
+
+            xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(xlsx_path)
+            return xlsx_path
+
     def tt_tables(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         with self.lock:
             current_race_time = self.current_race_time()
             recorded = self._announcer_recorded_map(current_race_time)
-            latest_by_bib: dict[str, PassingRecord] = {}
+            early_by_bib: dict[str, PassingRecord] = {}
             for passing in self.passings:
-                latest_by_bib[str(passing.bib)] = passing
+                bib = str(passing.bib)
+                previous = early_by_bib.get(bib)
+                if previous is None:
+                    early_by_bib[bib] = passing
+                elif passing.race_time is not None and (
+                    previous.race_time is None or float(passing.race_time) < float(previous.race_time)
+                ):
+                    early_by_bib[bib] = passing
             active_rows: list[dict[str, Any]] = []
             completed_rows: list[dict[str, Any]] = []
             is_tt = self.is_time_trial()
-            for bib, passing in latest_by_bib.items():
+            for bib, passing in early_by_bib.items():
                 rec = recorded.get(bib)
                 rec_t = rec.get("t") if rec else None
                 is_completed = False
@@ -1357,12 +1529,15 @@ class SharedState:
                 if is_completed:
                     row = self._tt_row_from_passing(passing, float(rec_t))
                     completed_rows.append(row)
-                    export_key = f"{bib}:{row['race_time']}"
+                    export_key = f"{bib}:{row['early_time']}"
                     if export_key not in self.tt_exported_keys:
-                        self._append_tt_completion_csv(row)
+                        export_read_key = self._export_read_key(passing)
+                        export_read_time = self._export_read_time(passing)
+                        if self._claim_export_read(self.tt_exported_read_times, export_read_key, export_read_time):
+                            self._append_tt_completion_csv(row)
                         self.tt_exported_keys.add(export_key)
                 else:
-                    active_rows.append(self._tt_row_from_passing(passing, passing.race_time))
+                    active_rows.append(self._tt_row_from_passing(passing, None))
                     if bib not in self.tt_diag_logged:
                         result = self.results_by_bib.get(str(bib))
                         if result:
@@ -1470,6 +1645,11 @@ class SharedState:
                     break
                 if not match:
                     continue
+                export_read_key = self._export_read_key(passing)
+                export_read_time = self._export_read_time(passing)
+                if not self._claim_export_read(self.road_exported_read_times, export_read_key, export_read_time):
+                    self.road_exported_keys.add(early_key)
+                    continue
                 self._append_road_passing_csv(self._road_export_row_from_match(passing, match))
                 self.road_exported_keys.add(early_key)
                 self.road_exported_recorded_keys.add(f"{passing.bib}:{match.get('lap')}:{format_clock_ms(float(match.get('t')))}")
@@ -1481,7 +1661,7 @@ class SharedState:
                 return None
             xlsx_path = self.road_xlsx_path or self.road_export_path.with_suffix(".xlsx")
             with self.road_export_path.open(newline="") as f:
-                rows = list(csv.DictReader(f))
+                rows = self._dedupe_export_rows(list(csv.DictReader(f)), "bib", "early_time")
             if not rows:
                 return None
 
@@ -2551,9 +2731,9 @@ body.is-desktop-portrait .compact-group-cell {{
   table-layout: fixed;
   font-size: 1rem;
 }}
-.tt-table col.tt-col-race {{ width: 9ch; }}
-.tt-table col.tt-col-bib {{ width: 5ch; }}
+.tt-table col.tt-col-bib {{ width: 96px; min-width: 96px; }}
 .tt-table col.tt-col-start {{ width: 8ch; }}
+.tt-table col.tt-col-early {{ width: 9ch; }}
 .tt-table col.tt-col-stop {{ width: 9ch; }}
 .tt-table col.tt-col-elapsed {{ width: 9ch; }}
 .tt-table col.tt-col-name {{ width: 24ch; }}
@@ -2581,6 +2761,19 @@ body.is-desktop-portrait .compact-group-cell {{
 .tt-table th.tt-num, .tt-table td.tt-num {{
   text-align: right;
   font-variant-numeric: tabular-nums;
+}}
+.tt-table th.tt-bib, .tt-table td.tt-bib {{
+  min-width: 96px;
+  width: 96px;
+  overflow: visible;
+  text-overflow: clip;
+}}
+#ttActiveRows .tt-table td.tt-bib {{
+  font-size: 2rem;
+  font-weight: 800;
+}}
+#ttCompletedRows .tt-table td.tt-bib {{
+  font-weight: 800;
 }}
 .tt-pane-bottom .tt-table tbody tr:nth-child(odd) {{
   background: rgba(255,255,255,.98);
@@ -2722,7 +2915,7 @@ function parseClockText(text) {{
 }}
 function compareTTValues(a, b, key) {{
   if (key === 'bib') return Number(a[key] || 0) - Number(b[key] || 0);
-  if (['race_time', 'start_time', 'stop_time', 'elapsed'].includes(key)) {{
+  if (['race_time', 'early_time', 'start_time', 'stop_time', 'elapsed'].includes(key)) {{
     const av = parseClockText(a[key]);
     const bv = parseClockText(b[key]);
     return (av ?? -Infinity) - (bv ?? -Infinity);
@@ -2920,9 +3113,9 @@ function compactGroupTableHtmlSeparate(groupTable) {{
 }}
 function ttTableHtml(rows, stopLabel, sortable=false) {{
   const viewRows = sortable ? sortTTRows(rows) : (rows || []);
-  const body = viewRows.map((row) => `<tr><td class="tt-num">${{esc(row.race_time || '')}}</td><td class="tt-num">${{esc(row.bib || '')}}</td><td class="tt-num">${{esc(row.start_time || '')}}</td><td class="tt-num">${{esc(row.stop_time || '')}}</td><td class="tt-num">${{esc(row.elapsed || '')}}</td><td>${{esc(((row.last_name || '') + ',' + (row.first_name || '')).replace(/^,|,$/g, ''))}}</td></tr>`).join('');
+  const body = viewRows.map((row) => `<tr><td class="tt-num tt-bib">${{esc(row.bib || '')}}</td><td class="tt-num">${{esc(row.start_time || '')}}</td><td class="tt-num">${{esc(row.early_time || row.race_time || '')}}</td><td class="tt-num">${{esc(row.stop_time || '')}}</td><td class="tt-num">${{esc(row.elapsed || '')}}</td><td>${{esc(((row.last_name || '') + ',' + (row.first_name || '')).replace(/^,|,$/g, ''))}}</td></tr>`).join('');
   const th = (label, key, cls='') => '<th class="' + cls + (sortable ? ' tt-sortable' : '') + '"' + (sortable ? ' data-tt-sort="' + key + '"' : '') + '>' + ttHeaderLabel(label, key, sortable) + '</th>';
-  return '<table class="tt-table"><colgroup><col class="tt-col-race"><col class="tt-col-bib"><col class="tt-col-start"><col class="tt-col-stop"><col class="tt-col-elapsed"><col class="tt-col-name"></colgroup><thead><tr>' + th('Race', 'race_time', 'tt-num') + th('BIB', 'bib', 'tt-num') + th('Start', 'start_time', 'tt-num') + th(stopLabel || 'Stop', 'stop_time', 'tt-num') + th('Elapsed', 'elapsed', 'tt-num') + th('Name', 'last_name') + '</tr></thead><tbody>' + body + '</tbody></table>';
+  return '<table class="tt-table"><colgroup><col class="tt-col-bib"><col class="tt-col-start"><col class="tt-col-early"><col class="tt-col-stop"><col class="tt-col-elapsed"><col class="tt-col-name"></colgroup><thead><tr>' + th('BIB', 'bib', 'tt-num tt-bib') + th('Start', 'start_time', 'tt-num') + th('Early', 'early_time', 'tt-num') + th('Finish', 'stop_time', 'tt-num') + th('Elapsed', 'elapsed', 'tt-num') + th('Name', 'last_name') + '</tr></thead><tbody>' + body + '</tbody></table>';
 }}
 function applyViewMode() {{
   document.body.classList.toggle('compact-mode', viewMode === 'compact');
@@ -3370,6 +3563,7 @@ class LapsrvApp:
         self.config = RaceConfig.load(Path(args.xlsx))
         self.state = SharedState(self.config, show_unknown_tags=args.show_unknown_tags)
         self.state.tt_export_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-tt-results.csv')
+        self.state.tt_xlsx_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-tt-results.xlsx')
         self.state.road_export_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-road-passings.csv')
         self.state.road_xlsx_path = Path(args.xlsx).with_name(Path(args.xlsx).stem + '-road-passings.xlsx')
         self.jchip = JChipServer(self.state, args.listen_host, args.port)
@@ -3431,7 +3625,14 @@ class LapsrvApp:
                 self.logger.warning("shutdown: timed out waiting for background tasks")
             await self._stop_with_timeout("web", self.web.stop())
             await self._stop_with_timeout("jchip", self.jchip.stop())
-            if not self.config.time_trial:
+            if self.config.time_trial:
+                try:
+                    exported = self.state.export_tt_xlsx()
+                    if exported:
+                        self.logger.info("tt results xlsx exported: %s", exported)
+                except Exception:
+                    self.logger.exception("failed to export tt results xlsx")
+            else:
                 try:
                     exported = self.state.export_road_xlsx()
                     if exported:
