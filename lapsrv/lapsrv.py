@@ -2280,7 +2280,7 @@ body.compact-mode main {{
   white-space: nowrap;
   line-height: 1.05;
 }}
-.view-toggle, .audio-toggle, .warning-toggle {{
+.view-toggle, .audio-toggle, .warning-toggle, .tt-min-toggle {{
   border: 1px solid rgba(250,204,21,.45);
   background: rgba(250,204,21,.12);
   color: #92400e;
@@ -2313,7 +2313,7 @@ body.compact-mode main {{
   border-color: rgba(21,128,61,.35);
   color: #166534;
 }}
-.audio-toggle.active, .warning-toggle.active {{
+.audio-toggle.active, .warning-toggle.active, .tt-min-toggle.active {{
   background: rgba(21,128,61,.12);
   border-color: rgba(21,128,61,.35);
   color: #166534;
@@ -2652,6 +2652,7 @@ body.is-desktop-portrait #event {{
 body.is-desktop-portrait .warning-toggle,
 body.is-desktop-portrait .view-toggle,
 body.is-desktop-portrait .audio-toggle,
+body.is-desktop-portrait .tt-min-toggle,
 body.is-desktop-portrait .compact-toggle {{
   font-size: 0.72rem;
   padding: 4px 8px;
@@ -2775,6 +2776,22 @@ body.is-desktop-portrait .compact-group-cell {{
 #ttCompletedRows .tt-table td.tt-bib {{
   font-weight: 800;
 }}
+body.tt-min-mode .tt-table col.tt-col-bib {{
+  width: 112px;
+  min-width: 112px;
+}}
+body.tt-min-mode .tt-table th.tt-bib,
+body.tt-min-mode .tt-table td.tt-bib {{
+  width: 112px;
+  min-width: 112px;
+}}
+body.tt-min-mode .tt-table td.tt-bib {{
+  font-size: 2rem;
+  font-weight: 800;
+}}
+body.tt-min-mode .tt-table col.tt-col-time {{
+  width: 10ch;
+}}
 .tt-pane-bottom .tt-table tbody tr:nth-child(odd) {{
   background: rgba(255,255,255,.98);
 }}
@@ -2827,6 +2844,7 @@ body.is-desktop-portrait .compact-group-cell {{
     </div>
     <div class="toolbar">
       <div class="tt-indicator" id="ttIndicator" style="display:none;">TT</div>
+      <button class="tt-min-toggle" id="ttMinToggle" type="button" style="display:none;">TTMin Off</button>
       <button class="warning-toggle" id="warningToggle" type="button" style="display:none;">Warning On</button>
       <button class="compact-toggle" id="compactToggle" type="button">Separate Off</button>
       <button class="view-toggle" id="viewToggle" type="button">Compact View</button>
@@ -2880,6 +2898,7 @@ let autoScroll = true;
 let compactAutoScroll = true;
 let viewMode = localStorage.getItem('lapsrv_view_mode') || 'full';
 let compactSeparate = localStorage.getItem('lapsrv_compact_separate') === '1';
+let ttMinMode = localStorage.getItem('lapsrv_tt_min') === '1';
 let lastIsTimeTrial = false;
 let ttCompletedSort = {{ key: null, dir: 'desc' }};
 let audioCtx = null;
@@ -2904,6 +2923,13 @@ function updateCompactToggle() {{
   button.textContent = compactSeparate ? 'Separate On' : 'Separate Off';
   button.classList.toggle('active', compactSeparate);
   button.style.display = lastIsTimeTrial && viewMode === 'tt' ? 'none' : '';
+}}
+function updateTTMinToggle() {{
+  const button = document.getElementById('ttMinToggle');
+  if (!button) return;
+  button.textContent = ttMinMode ? 'TTMin On' : 'TTMin Off';
+  button.classList.toggle('active', ttMinMode);
+  button.style.display = lastIsTimeTrial && viewMode === 'tt' ? '' : 'none';
 }}
 function compactPos(note) {{
   const raw = (note || '').trim();
@@ -3129,6 +3155,14 @@ function compactGroupTableHtmlSeparate(groupTable) {{
 }}
 function ttTableHtml(rows, stopLabel, sortable=false) {{
   const viewRows = sortable ? sortTTRows(rows) : (rows || []);
+  if (ttMinMode) {{
+    const isFinished = stopLabel === 'Stop';
+    const timeKey = isFinished ? 'stop_time' : 'early_time';
+    const timeLabel = isFinished ? 'Finish' : 'Early';
+    const body = viewRows.map((row) => `<tr><td class="tt-num tt-bib">${{esc(row.bib || '')}}</td><td class="tt-num">${{esc(row[timeKey] || row.race_time || '')}}</td><td>${{esc(((row.last_name || '') + ',' + (row.first_name || '')).replace(/^,|,$/g, ''))}}</td></tr>`).join('');
+    const th = (label, key, cls='') => '<th class="' + cls + (sortable ? ' tt-sortable' : '') + '"' + (sortable ? ' data-tt-sort="' + key + '"' : '') + '>' + ttHeaderLabel(label, key, sortable) + '</th>';
+    return '<table class="tt-table tt-min-table"><colgroup><col class="tt-col-bib"><col class="tt-col-time"><col class="tt-col-name"></colgroup><thead><tr>' + th('BIB', 'bib', 'tt-num tt-bib') + th(timeLabel, timeKey, 'tt-num') + th('Name', 'last_name') + '</tr></thead><tbody>' + body + '</tbody></table>';
+  }}
   const body = viewRows.map((row) => `<tr><td class="tt-num tt-bib">${{esc(row.bib || '')}}</td><td class="tt-num">${{esc(row.start_time || '')}}</td><td class="tt-num">${{esc(row.early_time || row.race_time || '')}}</td><td class="tt-num">${{esc(row.stop_time || '')}}</td><td class="tt-num">${{esc(row.elapsed || '')}}</td><td>${{esc(((row.last_name || '') + ',' + (row.first_name || '')).replace(/^,|,$/g, ''))}}</td></tr>`).join('');
   const th = (label, key, cls='') => '<th class="' + cls + (sortable ? ' tt-sortable' : '') + '"' + (sortable ? ' data-tt-sort="' + key + '"' : '') + '>' + ttHeaderLabel(label, key, sortable) + '</th>';
   return '<table class="tt-table"><colgroup><col class="tt-col-bib"><col class="tt-col-start"><col class="tt-col-early"><col class="tt-col-stop"><col class="tt-col-elapsed"><col class="tt-col-name"></colgroup><thead><tr>' + th('BIB', 'bib', 'tt-num tt-bib') + th('Start', 'start_time', 'tt-num') + th('Early', 'early_time', 'tt-num') + th('Finish', 'stop_time', 'tt-num') + th('Elapsed', 'elapsed', 'tt-num') + th('Name', 'last_name') + '</tr></thead><tbody>' + body + '</tbody></table>';
@@ -3136,6 +3170,7 @@ function ttTableHtml(rows, stopLabel, sortable=false) {{
 function applyViewMode() {{
   document.body.classList.toggle('compact-mode', viewMode === 'compact');
   document.body.classList.toggle('tt-mode', viewMode === 'tt');
+  document.body.classList.toggle('tt-min-mode', ttMinMode);
   const button = document.getElementById('viewToggle');
   if (!button) return;
   if (lastIsTimeTrial) {{
@@ -3145,6 +3180,7 @@ function applyViewMode() {{
     button.textContent = viewMode === 'compact' ? 'Full View' : 'Compact View';
   }}
   updateCompactToggle();
+  updateTTMinToggle();
 }}
 function updateAudioButton() {{
   const button = document.getElementById('audioToggle');
@@ -3241,6 +3277,7 @@ const ttCompletedRowsEl = document.getElementById('ttCompletedRows');
 const compactToggle = document.getElementById('compactToggle');
 const warningToggle = document.getElementById('warningToggle');
 const viewToggle = document.getElementById('viewToggle');
+const ttMinToggle = document.getElementById('ttMinToggle');
 const audioToggle = document.getElementById('audioToggle');
 const ipHealthBar = document.getElementById('ipHealthBar');
 applyDeviceClass();
@@ -3258,8 +3295,12 @@ if (ttCompletedRowsEl) {{
       ttCompletedSort.key = key;
       ttCompletedSort.dir = ['last_name', 'first_name'].includes(key) ? 'asc' : 'desc';
     }}
-    ttCompletedRowsEl.innerHTML = ttTableHtml(window.__ttCompletedRows || [], 'Stop', true);
+    renderTTTables();
   }});
+}}
+function renderTTTables() {{
+  document.getElementById('ttActiveRows').innerHTML = ttTableHtml(window.__ttActiveRows || [], 'Early');
+  document.getElementById('ttCompletedRows').innerHTML = ttTableHtml(window.__ttCompletedRows || [], 'Stop', true);
 }}
 if (compactToggle) {{
   compactToggle.addEventListener('click', () => {{
@@ -3282,6 +3323,12 @@ viewToggle.addEventListener('click', () => {{
   }}
   localStorage.setItem('lapsrv_view_mode', viewMode);
   applyViewMode();
+}});
+ttMinToggle.addEventListener('click', () => {{
+  ttMinMode = !ttMinMode;
+  localStorage.setItem('lapsrv_tt_min', ttMinMode ? '1' : '0');
+  applyViewMode();
+  renderTTTables();
 }});
 audioToggle.addEventListener('click', async () => {{
   if (audioEnabled) {{
@@ -3330,8 +3377,8 @@ async function refresh() {{
     compactRecentRowsWrap.scrollTop = compactRecentRowsWrap.scrollHeight;
   }}
   window.__ttCompletedRows = data.tt_completed_rows || [];
-  document.getElementById('ttActiveRows').innerHTML = ttTableHtml(data.tt_active_rows || [], 'Early');
-  document.getElementById('ttCompletedRows').innerHTML = ttTableHtml(window.__ttCompletedRows, 'Stop', true);
+  window.__ttActiveRows = data.tt_active_rows || [];
+  renderTTTables();
   maybePlayBellTone(recentGroupTable);
   pastGroupRowsWrap.innerHTML = groupTableHtml(data.past_group_table || {{headers: [], header_status: {{}}, rows: []}});
   document.getElementById('rows').innerHTML = (data.passings || []).map(rowHtml).join('');
